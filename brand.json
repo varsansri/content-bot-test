@@ -1,0 +1,41 @@
+{
+  "brand_name": "Your Brand",
+  "instagram_handle": "@yourbrand",
+  "about": "What the account is about and who follows it. Example: daily tips for beginner traders in India.",
+  "voice": "Friendly and confident. Short sentences. Simple English. One emoji at most.",
+  "language": "English",
+  "topics": [
+    "Topic one",
+    "Topic two",
+    "Topic three"
+  ],
+  "example_captions": [
+    "Paste 3-5 real captions you like here, so the bot copies the style."
+  ],
+  "always_hashtags": ["#yourbrand"],
+  "hashtag_count": 8,
+
+  "image_style": "cinematic photo, soft natural light, rich colours, shallow depth of field",
+  "image_avoid": "text, letters, words, watermark, logo, signature",
+  "black_and_white": false,
+
+  "colors": {
+    "text": "#FFFFFF",
+    "accent": "#FFC107",
+    "overlay": "#000000"
+  },
+  "overlay_strength": 0.8,
+  "fonts": {
+    "headline": "fonts/Poppins-Bold.ttf",
+    "body": "fonts/Poppins-Regular.ttf"
+  },
+  "logo": {
+    "file": "assets/logo.png",
+    "position": "top-left",
+    "width": 180
+  },
+
+  "post_times": ["19:00"],
+  "auto_post": false,
+  "timezone": "Asia/Kolkata"
+}

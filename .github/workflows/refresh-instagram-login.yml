@@ -1,0 +1,23 @@
+name: refresh instagram login
+
+# Instagram logins die after 60 days unless refreshed. This refreshes it every Monday.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh and save the Instagram token
+        env:
+          IG_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::error::Add the GH_PAT secret (see README) so the bot can save the new login."; exit 1; fi
+          new=$(curl -fsS "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${IG_TOKEN}" \
+            | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$new"
+          gh secret set INSTAGRAM_ACCESS_TOKEN --repo "$GITHUB_REPOSITORY" --body "$new"
+          echo "Instagram login refreshed."
