@@ -23,6 +23,9 @@ on:
       aspect:
         description: "Picture shape: 4:5 | 1:1 | 9:16 (new only)"
         default: ""
+      logo:
+        description: Logo file from brand.json logos, or none (new only)
+        default: ""
   schedule:
     - cron: "7,37 * * * *" # checks twice an hour whether a post_times slot is due
 
@@ -81,6 +84,7 @@ jobs:
           CAPTION: ${{ inputs.caption }}
           PHOTO: ${{ inputs.photo }}
           ASPECT: ${{ inputs.aspect }}
+          LOGO: ${{ inputs.logo }}
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then python run.py schedule; else python run.py action; fi
 

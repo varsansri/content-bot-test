@@ -12,13 +12,13 @@
   "example_captions": [
     "Paste 3-5 real captions you like here, so the bot copies the style."
   ],
-  "always_hashtags": ["#yourbrand"],
+  "always_hashtags": [
+    "#yourbrand"
+  ],
   "hashtag_count": 8,
-
   "image_style": "cinematic photo, soft natural light, rich colours, shallow depth of field",
   "image_avoid": "text, letters, words, watermark, logo, signature",
   "black_and_white": false,
-
   "colors": {
     "text": "#FFFFFF",
     "accent": "#FFC107",
@@ -30,12 +30,27 @@
     "body": "fonts/Poppins-Regular.ttf"
   },
   "logo": {
-    "file": "assets/logo.png",
+    "file": "assets/logos/reaching-dreams.png",
     "position": "top-left",
-    "width": 180
+    "width": 170
   },
-
-  "post_times": ["19:00"],
+  "post_times": [
+    "19:00"
+  ],
   "auto_post": false,
-  "timezone": "Asia/Kolkata"
+  "timezone": "Asia/Kolkata",
+  "logos": [
+    {
+      "name": "Reaching Dreams",
+      "file": "assets/logos/reaching-dreams.png",
+      "width": 170,
+      "handle": ""
+    },
+    {
+      "name": "Reaching Dreams (full)",
+      "file": "assets/logos/reaching-dreams-white.png",
+      "width": 380,
+      "handle": ""
+    }
+  ]
 }

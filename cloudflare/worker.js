@@ -17,8 +17,8 @@ const ALLOWED = [
   ["POST", /^\/git\/(trees|commits|refs)$/],
   ["POST", /^\/actions\/workflows\/bot\.yml\/dispatches$/],
   ["GET", /^\/actions\/runs\?[\w=&]+$/],
-  ["GET", /^\/contents\/(brand\.json|assets\/[\w.-]+|uploads\/[\w.-]+)\?ref=(main|drafts)$/],
-  ["PUT", /^\/contents\/(brand\.json|assets\/[\w.-]+|uploads\/[\w.-]+)$/],
+  ["GET", /^\/contents\/(brand\.json|assets\/(logos\/)?[\w.-]+|uploads\/[\w.-]+)\?ref=(main|drafts)$/],
+  ["PUT", /^\/contents\/(brand\.json|assets\/(logos\/)?[\w.-]+|uploads\/[\w.-]+)$/],
 ];
 
 const enc = new TextEncoder();

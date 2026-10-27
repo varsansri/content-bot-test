@@ -69,18 +69,21 @@ def push_drafts(message):
 
 
 def latest_brand():
-    """brand.json and the logo as they are on GitHub now (the website edits them there)."""
+    """brand.json as it is on GitHub now (the website edits it there)."""
     git("fetch", "-q", "origin", "main", cwd=ROOT)
-    brand = json.loads(git("show", "origin/main:brand.json", cwd=ROOT))
-    logo_file = brand.get("logo", {}).get("file", "assets/logo.png")
-    logo = subprocess.run(["git", "show", f"origin/main:{logo_file}"], cwd=ROOT, capture_output=True)
-    if logo.returncode == 0:
-        path = os.path.join(WORK, "logo.png")
-        os.makedirs(WORK, exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(logo.stdout)
-        brand.setdefault("logo", {})["file"] = path  # images.compose joins it; an absolute path wins
-    return brand
+    return json.loads(git("show", "origin/main:brand.json", cwd=ROOT))
+
+
+def logo_file(path):
+    """Copy a logo from GitHub's main branch to this PC; images.compose joins the path, so an absolute one wins."""
+    logo = subprocess.run(["git", "show", f"origin/main:{path}"], cwd=ROOT, capture_output=True)
+    if logo.returncode:
+        return path  # missing: the post is made without a logo
+    out = os.path.join(WORK, "logos", os.path.basename(path))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(logo.stdout)
+    return out
 
 
 # ---------- Antigravity ----------
@@ -140,7 +143,7 @@ def new_pictures(since):
     found = []
     for root in (BRAIN, WORK):
         for path in glob.glob(os.path.join(root, "**", "*"), recursive=True):
-            if path.lower().endswith(PICTURE_TYPES) and os.path.getmtime(path) > since and not path.endswith("logo.png"):
+            if path.lower().endswith(PICTURE_TYPES) and os.path.getmtime(path) > since and os.sep + "logos" + os.sep not in path:
                 found.append(path)
     return sorted(found, key=os.path.getmtime)
 
@@ -200,7 +203,7 @@ def handle(draft):
     else:
         raise RuntimeError(f"Unknown job {job!r}")
 
-    run.render(draft, brand, background)
+    run.render(draft, brand, background, resolve=logo_file)
     draft["status"] = "draft"
     draft.pop("pc_job", None)
     draft.pop("pc_started", None)

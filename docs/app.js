@@ -29,6 +29,8 @@ let editing = null;
 let filter = store.get("filter", "review");
 let count = 1;
 let aspect = store.get("aspect", "4:5");
+let logoChoice = store.get("logo", ""); // a file from brand.logos, "none", or "" for the default
+const logoUrls = {}; // file -> object URL
 
 // ---------- GitHub API ----------
 
@@ -325,7 +327,7 @@ async function makePost(topic, photoFile, size = aspect) {
     photo = `uploads/${id}.jpg`;
     await putFile(photo, await photoToJpegB64(photoFile), `photo for ${id}`, "drafts");
   }
-  await dispatch("new", id, { topic, photo, aspect: size || "4:5" });
+  await dispatch("new", id, { topic, photo, aspect: size || "4:5", logo: currentLogo() });
 }
 
 async function onNewPost() {
@@ -360,6 +362,122 @@ function renderCreate() {
   $("#count-plus").disabled = !!photo || count >= 10;
   document.querySelectorAll("#sizes .size").forEach((b) => b.classList.toggle("on", b.dataset.aspect === aspect));
   $("#new-go").textContent = `Make ${n} ${SIZE_NAME[aspect].toLowerCase()} post${n > 1 ? "s" : ""}`;
+  renderLogoPick();
+}
+
+// ---------- logos ----------
+
+const logos = () => (brand && brand.logos) || [];
+const defaultLogo = () => (brand && brand.logo && brand.logo.file) || "";
+
+function currentLogo() {
+  if (logoChoice === "none") return "none";
+  return logos().some((l) => l.file === logoChoice) ? logoChoice : defaultLogo();
+}
+
+function logoImg(file) {
+  if (!logoUrls[file]) {
+    logoUrls[file] = gh(`/contents/${file}?ref=${repoInfo.default_branch}`, { accept: "application/vnd.github.raw+json", raw: true })
+      .then((r) => r.blob()).then((b) => URL.createObjectURL(b)).catch(() => "");
+  }
+  return logoUrls[file];
+}
+
+// Fills <img data-logo="file"> tags once their pictures arrive.
+function fillLogoImgs(root) {
+  root.querySelectorAll("img[data-logo]").forEach(async (img) => { img.src = await logoImg(img.dataset.logo); });
+}
+
+function renderLogoPick() {
+  const box = $("#logo-pick");
+  if (!box || !brand) return;
+  const cur = currentLogo();
+  box.innerHTML = logos().map((l) => `<button type="button" class="logo-tile ${l.file === cur ? "on" : ""}" data-file="${esc(l.file)}">
+      <span class="logo-pic"><img data-logo="${esc(l.file)}" alt=""></span><small>${esc(l.name)}</small></button>`).join("") +
+    `<button type="button" class="logo-tile ${cur === "none" ? "on" : ""}" data-file="none"><span class="logo-pic none">–</span><small>No logo</small></button>`;
+  fillLogoImgs(box);
+}
+
+function renderLogoList() {
+  const def = defaultLogo();
+  $("#logo-list").innerHTML = logos().map((l, i) => `<div class="logo-item" data-i="${i}">
+      <span class="logo-pic"><img data-logo="${esc(l.file)}" alt=""></span>
+      <div class="logo-fields">
+        <b>${esc(l.name)}</b> ${l.file === def ? `<span class="chip posted">Default</span>` : ""}
+        <label>Handle on the picture <input data-k="handle" value="${esc(l.handle || "")}" placeholder="${esc(brand.instagram_handle || "@yourbrand")}"></label>
+        <label>Width in pixels <input data-k="width" type="number" min="40" max="900" value="${esc(l.width || 180)}"></label>
+        <div class="row">
+          ${l.file === def ? "" : `<button type="button" data-logo-act="default">Make default</button>`}
+          <button type="button" class="danger" data-logo-act="remove">Remove</button>
+        </div>
+      </div></div>`).join("") || `<p class="muted">No logos yet. Add one below.</p>`;
+  fillLogoImgs($("#logo-list"));
+}
+
+function readLogoFields() {
+  document.querySelectorAll("#logo-list .logo-item").forEach((row) => {
+    const l = brand.logos[row.dataset.i];
+    l.handle = row.querySelector('[data-k="handle"]').value.trim();
+    l.width = Number(row.querySelector('[data-k="width"]').value) || 180;
+  });
+}
+
+async function onLogoListClick(e) {
+  const btn = e.target.closest("button[data-logo-act]");
+  if (!btn) return;
+  const i = Number(btn.closest(".logo-item").dataset.i);
+  btn.disabled = true;
+  try {
+    readLogoFields();
+    const picked = brand.logos[i];
+    await loadBrand(); // start from the latest version
+    brand.logos = brand.logos || [];
+    const j = brand.logos.findIndex((l) => l.file === picked.file);
+    if (j < 0) throw new Error("That logo was already removed.");
+    if (btn.dataset.logoAct === "default") {
+      brand.logo = { ...(brand.logo || {}), file: picked.file, width: picked.width };
+      await saveBrand(`Default logo: ${picked.name}`);
+      toast(`${picked.name} is now the default logo.`);
+    } else {
+      if (brand.logos.length === 1) throw new Error("Keep at least one logo. Add another one first.");
+      brand.logos.splice(j, 1);
+      if (brand.logo && brand.logo.file === picked.file) brand.logo = { ...brand.logo, file: brand.logos[0].file, width: brand.logos[0].width };
+      await saveBrand(`Remove logo: ${picked.name}`);
+      toast(`${picked.name} removed.`);
+    }
+    renderLogoList();
+    renderLogoPick();
+  } catch (err) {
+    toast(err.message);
+    btn.disabled = false;
+  }
+}
+
+async function onLogoAdd() {
+  const btn = $("#logo-add");
+  const name = $("#logo-name").value.trim();
+  const file = $("#logo-file").files[0];
+  if (!name || !file) { toast("Give the logo a name and pick a PNG file."); return; }
+  btn.disabled = true;
+  try {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "logo";
+    const path = `assets/logos/${slug}-${Date.now().toString(36)}.png`;
+    await putFile(path, bytesToB64(new Uint8Array(await file.arrayBuffer())), `Add logo: ${name}`, repoInfo.default_branch);
+    await loadBrand();
+    brand.logos = [...(brand.logos || []), { name, file: path, width: 180, handle: $("#logo-handle").value.trim() }];
+    await saveBrand(`Add logo: ${name}`);
+    logoUrls[path] = Promise.resolve(URL.createObjectURL(file));
+    $("#logo-name").value = "";
+    $("#logo-handle").value = "";
+    $("#logo-file").value = "";
+    renderLogoList();
+    renderLogoPick();
+    toast(`${name} added. Pick it when you make posts.`);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------- brand ----------
@@ -384,7 +502,6 @@ const FIELDS = [
   ["colors.overlay", "Shade colour behind text", "color"],
   ["overlay_strength", "Shade strength (0 to 1)", "decimal"],
   ["logo.position", "Logo position", "select:top-left,top-right,bottom-left,bottom-right"],
-  ["logo.width", "Logo width in pixels (picture is 1080 wide)", "number"],
   "Daily schedule",
   ["post_times", "Daily posting times, 24-hour (e.g. 10:00, 19:00)", "csv"],
   ["timezone", "Timezone (e.g. Asia/Kolkata)", "text"],
@@ -441,6 +558,7 @@ async function loadBrand() {
   brand = JSON.parse(b64ToText(file.content));
   brandSha = file.sha;
   renderSchedule();
+  renderLogoPick();
 }
 
 async function saveBrand(message) {
@@ -451,17 +569,21 @@ async function saveBrand(message) {
 
 function renderBrand() {
   $("#brand-form").innerHTML = FIELDS.map(fieldHtml).join("");
-  gh(`/contents/${brand.logo?.file || "assets/logo.png"}?ref=${repoInfo.default_branch}`, { accept: "application/vnd.github.raw+json", raw: true })
-    .then((r) => r.blob()).then((b) => { $("#logo-img").src = URL.createObjectURL(b); }).catch(() => {});
+  renderLogoList();
 }
 
 async function onBrandSave() {
   const btn = $("#brand-save");
   btn.disabled = true;
   try {
-    await loadBrand(); // start from the latest version
     const values = FIELDS.map(readField);
+    readLogoFields();
+    const logoEdits = Object.fromEntries(logos().map((l) => [l.file, { handle: l.handle, width: l.width }]));
+    await loadBrand(); // start from the latest version
     FIELDS.forEach((field, i) => { if (typeof field !== "string") setPath(brand, field[0], values[i]); });
+    for (const l of logos()) Object.assign(l, logoEdits[l.file] || {});
+    const def = logos().find((l) => l.file === defaultLogo());
+    if (def) brand.logo.width = def.width;
     await saveBrand("Update brand settings");
     toast("Saved. New posts use the new look.");
   } catch (e) {
@@ -469,21 +591,6 @@ async function onBrandSave() {
   } finally {
     btn.disabled = false;
   }
-}
-
-async function onLogoPick(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  try {
-    const path = brand.logo?.file || "assets/logo.png";
-    const b64 = bytesToB64(new Uint8Array(await file.arrayBuffer()));
-    await putFile(path, b64, "Update logo", repoInfo.default_branch, await fileSha(path, repoInfo.default_branch));
-    $("#logo-img").src = URL.createObjectURL(file);
-    toast("Logo saved.");
-  } catch (err) {
-    toast(err.message);
-  }
-  e.target.value = "";
 }
 
 function renderSchedule() {
@@ -597,7 +704,15 @@ function init() {
   renderCreate();
   $("#list").addEventListener("click", onCardClick);
   $("#brand-save").addEventListener("click", onBrandSave);
-  $("#logo-file").addEventListener("change", onLogoPick);
+  $("#logo-add").addEventListener("click", onLogoAdd);
+  $("#logo-list").addEventListener("click", onLogoListClick);
+  $("#logo-pick").addEventListener("click", (e) => {
+    const b = e.target.closest(".logo-tile");
+    if (!b) return;
+    logoChoice = b.dataset.file;
+    store.set("logo", logoChoice);
+    renderLogoPick();
+  });
   $("#auto-toggle").addEventListener("change", onAutoToggle);
   document.querySelectorAll(".tab[data-tab]").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
   document.addEventListener("visibilitychange", () => { if (!document.hidden && repoInfo) poll(0); });

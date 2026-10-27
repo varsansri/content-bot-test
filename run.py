@@ -15,6 +15,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 import traceback
 from zoneinfo import ZoneInfo
@@ -92,8 +93,25 @@ def due_slots(brand):
 
 # ---------- the work ----------
 
-def render(draft, brand, background):
+def with_logo(brand, draft, resolve=lambda f: f):
+    """The brand settings with this post's logo: draft["logo"] is a file from brand["logos"], "none", or empty (default)."""
+    choice = draft.get("logo") or brand.get("logo", {}).get("file", "assets/logo.png")
+    brand = {**brand, "logo": dict(brand.get("logo", {}))}
+    if choice == "none":
+        brand["logo"]["file"] = "assets/no-logo.png"  # a missing file means no logo is drawn
+        return brand
+    entry = next((l for l in brand.get("logos", []) if l.get("file") == choice), {})
+    brand["logo"]["file"] = resolve(choice)
+    if entry.get("width"):
+        brand["logo"]["width"] = entry["width"]
+    if entry.get("handle"):
+        brand["instagram_handle"] = entry["handle"]
+    return brand
+
+
+def render(draft, brand, background, resolve=lambda f: f):
     import images
+    brand = with_logo(brand, draft, resolve)
     buf = io.BytesIO()
     background.save(buf, "JPEG", quality=95)
     write_bytes(draft_path(draft["id"], "background.jpg"), buf.getvalue())
@@ -117,10 +135,11 @@ def queue_for_pc(draft, job):
     return draft
 
 
-def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None, aspect=None):
+def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None, aspect=None, logo=None):
     aspect = aspect if aspect in ("4:5", "1:1", "9:16") else brand.get("aspect", "4:5")
+    logo = logo if logo == "none" or re.fullmatch(r"assets/[\w./-]+\.png", logo or "") and ".." not in logo else ""
     if not has_text_ai() or (not photo_file and not has_picture_ai()):
-        return queue_for_pc({"id": draft_id, "created": stamp(), "topic": topic or "", "aspect": aspect,
+        return queue_for_pc({"id": draft_id, "created": stamp(), "topic": topic or "", "aspect": aspect, "logo": logo,
                              "own_photo": bool(photo_file), "photo_file": photo_file or "", "slot": slot}, "new")
 
     import content
@@ -129,7 +148,7 @@ def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None, aspect=N
 
     photo = read_bytes(os.path.join(DATA, photo_file)) if photo_file else None
     draft = {"id": draft_id, "status": "working", "created": stamp(), "topic": topic or "",
-             "own_photo": bool(photo), "slot": slot, "aspect": aspect}
+             "own_photo": bool(photo), "slot": slot, "aspect": aspect, "logo": logo}
     save_draft(draft)
     post = content.write_post(brand, topic, recent_headlines(), photo)
     draft.update(post)
@@ -181,11 +200,11 @@ def publish(draft):
     draft["permalink"] = link
 
 
-def do_action(action, draft_id, topic="", caption="", photo="", aspect=""):
+def do_action(action, draft_id, topic="", caption="", photo="", aspect="", logo=""):
     brand = load_brand()
     if action == "new":
         try:
-            make_draft(draft_id, brand, topic or None, photo or None, aspect=aspect)
+            make_draft(draft_id, brand, topic or None, photo or None, aspect=aspect, logo=logo)
         except Exception as e:
             fail_new(draft_id, e)
         return
@@ -255,7 +274,7 @@ def main():
             sys.exit("A valid ID is needed.")
         do_action(os.environ.get("ACTION", "").strip(), draft_id,
                   os.environ.get("TOPIC", ""), os.environ.get("CAPTION", ""), os.environ.get("PHOTO", "").strip(),
-                  os.environ.get("ASPECT", "").strip())
+                  os.environ.get("ASPECT", "").strip(), os.environ.get("LOGO", "").strip())
     else:
         sys.exit(__doc__)
 
