@@ -1,5 +1,6 @@
-// Content Bot website. Talks to the GitHub repo: reads drafts from the "drafts" branch,
-// starts the "bot" workflow for every action, and edits brand.json / the logo on the main branch.
+// Mi Media Content Lab website. Talks to the GitHub repo through /api/gh (the Cloudflare worker
+// adds the token): reads drafts from the "drafts" branch, starts the "bot" workflow for every
+// action, and edits brand.json / the logo on the main branch.
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -15,7 +16,6 @@ const store = {
   },
 };
 
-let cfg = store.get("cfg", null) || guessRepo();
 let repoInfo = null;
 let brand = null;
 let brandSha = null;
@@ -27,26 +27,14 @@ let shown = []; // [{ draft, draftSha, imgSha }]
 let pollTimer = null;
 let editing = null;
 
-function guessRepo() {
-  const host = location.hostname;
-  if (host.endsWith(".github.io")) {
-    const owner = host.split(".")[0];
-    const repo = location.pathname.split("/").filter(Boolean)[0] || host;
-    return { owner, repo, token: "" };
-  }
-  return { owner: "", repo: "", token: "" };
-}
-
 // ---------- GitHub API ----------
 
 async function gh(path, { method = "GET", body, accept, raw } = {}) {
-  const res = await fetch(`https://api.github.com/repos/${cfg.owner}/${cfg.repo}${path}`, {
+  const res = await fetch(`/api/gh${path}`, {
     method,
     cache: "no-store",
     headers: {
-      Authorization: `Bearer ${cfg.token}`,
       Accept: accept || "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -54,7 +42,7 @@ async function gh(path, { method = "GET", body, accept, raw } = {}) {
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).message || msg; } catch { /* not JSON */ }
-    const err = new Error(`GitHub said: ${msg} (${res.status})`);
+    const err = new Error(res.status === 401 ? "Please log in again." : `GitHub said: ${msg} (${res.status})`);
     err.status = res.status;
     throw err;
   }
@@ -144,7 +132,7 @@ async function checkRuns() {
       else { p.error = `The run ${run.conclusion}.`; p.runUrl = run.html_url; }
     } else if (Date.now() - p.at > 10 * 60000) {
       p.error = "This is taking too long.";
-      p.runUrl = `https://github.com/${cfg.owner}/${cfg.repo}/actions`;
+      p.runUrl = `${repoInfo.html_url}/actions`;
     }
   }
 }
@@ -160,6 +148,7 @@ async function refresh() {
     store.set("pending", pending);
     renderList();
   } catch (e) {
+    if (e.status === 401) return showLogin(e.message);
     toast(e.message);
   }
 }
@@ -168,7 +157,7 @@ function poll(delay) {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
     await refresh();
-    const busy = Object.values(pending).some((p) => !p.error);
+    const busy = Object.values(pending).some((p) => !p.error) || shown.some((s) => s.draft.status === "queued");
     poll(busy ? 6000 : 60000);
   }, delay);
 }
@@ -177,7 +166,7 @@ function poll(delay) {
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-const STATUS = { draft: "Waiting for you", posted: "Posted", skipped: "Skipped", failed: "Failed", working: "Working" };
+const STATUS = { draft: "Waiting for you", posted: "Posted", skipped: "Skipped", failed: "Failed", working: "Working", queued: "On the PC" };
 const ACTION_TEXT = { new: "Making the post…", post: "Posting to Instagram…", picture: "Making a new picture…", text: "Writing new text…", caption: "Saving the caption…", skip: "Skipping…" };
 
 function fullCaption(d) {
@@ -202,12 +191,16 @@ function renderList() {
 
 function cardHtml({ draft: d, imgSha, ghost }) {
   const p = pending[d.id];
-  const busy = p && !p.error;
-  const status = busy ? "working" : d.status;
+  const queued = d.status === "queued" && !(p && !p.error);
+  const busy = (p && !p.error) || queued;
+  const status = queued ? "queued" : busy ? "working" : d.status;
   const img = imgSha && imgCache[imgSha];
+  const busyText = queued
+    ? `${d.pc_started ? "Your PC is making it now…" : "Waiting for your PC…"}<br><span class="muted small">${d.pc_started ? "about 2 minutes" : "the PC helper must be running"}</span>`
+    : busy ? `${esc(ACTION_TEXT[p.action] || "Working…")}<br><span class="muted small">about a minute</span>` : "";
   let html = `<article class="card" data-id="${esc(d.id)}">
     <div class="pic">${img ? `<img src="${img}" alt="${esc(d.headline)}">` : ""}
-      ${busy ? `<div class="busy">${esc(ACTION_TEXT[p.action] || "Working…")}<br><span class="muted small">about a minute</span></div>` : ""}
+      ${busyText ? `<div class="busy">${busyText}</div>` : ""}
     </div><div class="body">
     <span class="chip ${status}">${STATUS[status] || esc(status)}</span><span class="when">${esc(when(d))}</span>`;
   if (p && p.error) html += `<div class="err">${esc(p.error)} <a href="${esc(p.runUrl)}" target="_blank" rel="noopener">See what happened</a></div>`;
@@ -462,7 +455,7 @@ async function onAutoToggle(e) {
   }
 }
 
-// ---------- setup + navigation ----------
+// ---------- log in + navigation ----------
 
 function showTab(name) {
   for (const id of ["posts", "brand", "setup"]) $(`#${id}`).hidden = id !== name;
@@ -471,31 +464,49 @@ function showTab(name) {
 }
 
 async function connect() {
-  $("#cfg-status").textContent = "Connecting…";
+  $("#cfg-status").textContent = "Loading…";
   repoInfo = await gh("");
-  if (!repoInfo.permissions || !repoInfo.permissions.push) throw new Error("This token cannot change the repository. Give it Contents and Actions write access.");
+  if (!repoInfo.permissions || !repoInfo.permissions.push) throw new Error("The bot's GitHub key cannot change the repository.");
   await ensureDraftsBranch();
   await loadBrand();
   $("#tabs").hidden = false;
-  $("#cfg-status").textContent = `Connected to ${cfg.owner}/${cfg.repo}.`;
+  $("#cfg-status").textContent = "";
   showTab("posts");
   await refresh();
   poll(Object.values(pending).some((p) => !p.error) ? 6000 : 60000);
 }
 
-async function onConnect() {
-  cfg = { owner: $("#cfg-owner").value.trim(), repo: $("#cfg-repo").value.trim(), token: $("#cfg-token").value.trim() };
-  if (!cfg.owner || !cfg.repo || !cfg.token) { $("#cfg-status").textContent = "Fill in all three."; return; }
+function showLogin(message = "") {
+  clearTimeout(pollTimer);
+  repoInfo = null;
+  $("#tabs").hidden = true;
+  showTab("setup");
+  $("#cfg-status").textContent = message;
+}
+
+async function onLogin(e) {
+  e.preventDefault();
+  const btn = $("#login-go");
+  btn.disabled = true;
+  $("#cfg-status").textContent = "Checking…";
   try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: $("#login-pass").value }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "Could not log in.");
+    $("#login-pass").value = "";
     await connect();
-    store.set("cfg", cfg);
-  } catch (e) {
-    $("#cfg-status").textContent = e.message;
+  } catch (err) {
+    $("#cfg-status").textContent = err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
-function onForget() {
-  store.remove("cfg");
+async function onLogout() {
+  await fetch("/api/logout", { method: "POST" }).catch(() => {});
   store.remove("pending");
   location.reload();
 }
@@ -510,24 +521,18 @@ function toast(msg) {
 }
 
 function init() {
-  $("#cfg-owner").value = cfg.owner;
-  $("#cfg-repo").value = cfg.repo;
-  $("#cfg-token").value = cfg.token;
-  $("#cfg-save").addEventListener("click", onConnect);
-  $("#cfg-forget").addEventListener("click", onForget);
+  $("#setup").addEventListener("submit", onLogin);
+  $("#logout").addEventListener("click", onLogout);
   $("#new-go").addEventListener("click", onNewPost);
   $("#list").addEventListener("click", onCardClick);
   $("#brand-save").addEventListener("click", onBrandSave);
   $("#logo-file").addEventListener("change", onLogoPick);
   $("#auto-toggle").addEventListener("change", onAutoToggle);
-  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+  document.querySelectorAll(".tab[data-tab]").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
   document.addEventListener("visibilitychange", () => { if (!document.hidden && repoInfo) poll(0); });
 
-  if (cfg.token) {
-    connect().catch((e) => { showTab("setup"); $("#cfg-status").textContent = e.message; });
-  } else {
-    showTab("setup");
-  }
+  store.remove("cfg"); // old GitHub token from the first version of the site
+  connect().catch((e) => showLogin(e.status === 401 ? "" : e.message));
 }
 
 init();

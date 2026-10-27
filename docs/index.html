@@ -3,35 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Content Bot</title>
+  <title>Mi Media Content Lab</title>
   <meta name="robots" content="noindex">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="top">
-    <h1>Content Bot</h1>
+    <h1>Mi Media Content Lab</h1>
     <nav id="tabs" hidden>
       <button data-tab="posts" class="tab on">Posts</button>
       <button data-tab="brand" class="tab">Brand</button>
-      <button data-tab="setup" class="tab">Setup</button>
+      <button id="logout" class="tab">Log out</button>
     </nav>
   </header>
 
   <main>
-    <!-- Connect to GitHub -->
-    <section id="setup" class="panel" hidden>
-      <h2>Connect</h2>
-      <p class="muted">The site talks to your GitHub repository. The token stays in this browser only.</p>
-      <label>GitHub username or organisation <input id="cfg-owner" autocomplete="off"></label>
-      <label>Repository name <input id="cfg-repo" autocomplete="off"></label>
-      <label>Access token <input id="cfg-token" type="password" autocomplete="off" placeholder="github_pat_…"></label>
-      <p class="muted small">Make one at GitHub → Settings → Developer settings → Fine-grained tokens. Repository: only this one. Permissions: Actions, Contents and Secrets set to Read and write.</p>
-      <div class="row">
-        <button id="cfg-save" class="primary">Connect</button>
-        <button id="cfg-forget" class="ghost">Forget on this device</button>
-      </div>
+    <!-- Log in -->
+    <form id="setup" class="panel" hidden>
+      <h2>Log in</h2>
+      <label>Password <input id="login-pass" type="password" autocomplete="current-password"></label>
+      <button id="login-go" class="primary wide">Log in</button>
       <p id="cfg-status" class="muted"></p>
-    </section>
+    </form>
 
     <!-- Posts -->
     <section id="posts" hidden>

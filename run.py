@@ -6,6 +6,9 @@
     ACTION=post|picture|text|caption|skip ID=... [CAPTION=...] python run.py action
 
 Drafts live in ./data (the "drafts" branch): data/drafts/<id>/draft.json, background.jpg, post.jpg
+
+Without the AI keys, new posts, new text and new pictures are queued (status "queued") for the
+PC helper (pc_helper.py), which makes them with Antigravity on the owner's PC.
 """
 import datetime as dt
 import glob
@@ -98,12 +101,31 @@ def render(draft, brand, background):
                 images.compose(background, draft["headline"], draft["subtext"], brand))
 
 
+def has_text_ai():
+    return bool(os.getenv("ANTHROPIC_API_KEY"))
+
+
+def has_picture_ai():
+    return bool((os.getenv("CLOUDFLARE_ACCOUNT_ID") and os.getenv("CLOUDFLARE_API_TOKEN")) or os.getenv("POLLINATIONS_TOKEN"))
+
+
+def queue_for_pc(draft, job):
+    draft["status"] = "queued"
+    draft["pc_job"] = job
+    save_draft(draft)
+    print(f"{draft['id']}: queued for the PC helper ({job})")
+    return draft
+
+
 def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None):
+    if not has_text_ai() or (not photo_file and not has_picture_ai()):
+        return queue_for_pc({"id": draft_id, "created": stamp(), "topic": topic or "",
+                             "own_photo": bool(photo_file), "photo_file": photo_file or "", "slot": slot}, "new")
+
     import content
     import images
     from PIL import Image
 
-    need("ANTHROPIC_API_KEY")
     photo = read_bytes(os.path.join(DATA, photo_file)) if photo_file else None
     draft = {"id": draft_id, "status": "working", "created": stamp(), "topic": topic or "",
              "own_photo": bool(photo), "slot": slot}
@@ -175,8 +197,12 @@ def do_action(action, draft_id, topic="", caption="", photo=""):
     try:
         if action == "post":
             publish(draft)
+        elif action == "picture" and not has_picture_ai() and not draft.get("own_photo"):
+            return queue_for_pc(draft, "picture")
         elif action == "picture":
             new_picture(draft, brand)
+        elif action == "text" and not has_text_ai():
+            return queue_for_pc(draft, "text")
         elif action == "text":
             new_text(draft, brand)
         elif action == "caption":

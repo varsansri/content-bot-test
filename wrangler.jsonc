@@ -1,0 +1,9 @@
+// Mi Media Content Lab website on Cloudflare: `npx wrangler deploy`
+{
+  "name": "mi-media-content-lab",
+  "account_id": "b7b2ca865d39d0b6e0fc5363aebb81d4",
+  "main": "cloudflare/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./docs", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  "workers_dev": true
+}
