@@ -114,11 +114,19 @@
     <section id="memory" hidden>
       <div class="panel">
         <h2>Memory</h2>
-        <p class="muted small">The brain reads these notes before every post, so it stays consistent. It adds its own lessons, and your approvals, rejections and caption edits are noted here too. Delete anything that is wrong.</p>
+        <p class="muted small">The brain reads these notes before every post. ★ highlighted notes are read first and always followed. After every post it writes a dated log line, lessons from your approvals, rejections and edits, and a highlighted hint when it finds something important. Un-star or delete anything that is wrong.</p>
         <label>Tell the brain something to remember
           <textarea id="memory-note" rows="2" placeholder="e.g. Always mention free shipping. Never use the colour red."></textarea>
         </label>
+        <label class="check"><input type="checkbox" id="memory-pin" checked>★ Highlight it (always follow)</label>
         <button id="memory-add" class="primary wide">Remember this</button>
+      </div>
+      <div class="filters" id="memory-filters">
+        <button data-mf="pinned" class="on">★ Highlighted <span></span></button>
+        <button data-mf="lesson">Lessons <span></span></button>
+        <button data-mf="feedback">Your feedback <span></span></button>
+        <button data-mf="log">Work log <span></span></button>
+        <button data-mf="all">All <span></span></button>
       </div>
       <div id="memory-list" class="memory-list"></div>
     </section>

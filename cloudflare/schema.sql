@@ -61,3 +61,8 @@ CREATE TABLE IF NOT EXISTS helper (
   last_seen TEXT NOT NULL,
   info TEXT NOT NULL DEFAULT '{}'        -- JSON: PC storage numbers, current job
 );
+
+-- 27 Oct: memory note types + highlights (applied with ALTER on the live database)
+-- kind: hint (highlighted, read first) | rule (you) | lesson (brain) | feedback | log (what the brain made, when)
+-- ALTER TABLE memory ADD COLUMN kind TEXT NOT NULL DEFAULT 'lesson';
+-- ALTER TABLE memory ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;

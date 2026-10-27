@@ -85,9 +85,23 @@ async function deleteFile(env, key) {
   if (key) await env.FILES.delete(key);
 }
 
-async function remember(env, projectId, source, note) {
+// kind: hint (highlighted, read first) | rule (from you) | lesson (brain) | feedback | log (what the brain made, when)
+async function remember(env, projectId, source, note, kind = "lesson", pinned = 0) {
   note = String(note || "").trim().slice(0, 600);
-  if (note) await run(env, "INSERT INTO memory (id, project_id, source, note, created) VALUES (?, ?, ?, ?, ?)", uid("m"), projectId, source, note, now());
+  if (!note) return;
+  if (kind !== "log" && (await one(env, "SELECT id FROM memory WHERE project_id = ? AND lower(note) = lower(?)", projectId, note))) return;
+  await run(env, "INSERT INTO memory (id, project_id, source, note, kind, pinned, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    uid("m"), projectId, source, note, kind, pinned ? 1 : 0, now());
+}
+
+// What the brain reads before a post: every highlighted note, then the newest lessons and feedback, then its recent work log.
+async function memoryForBrain(env, projectId) {
+  const [hints, lessons, log] = await Promise.all([
+    all(env, "SELECT kind, source, note, created FROM memory WHERE project_id = ? AND pinned = 1 ORDER BY created DESC LIMIT 40", projectId),
+    all(env, "SELECT kind, source, note, created FROM memory WHERE project_id = ? AND pinned = 0 AND kind != 'log' ORDER BY created DESC LIMIT 40", projectId),
+    all(env, "SELECT kind, source, note, created FROM memory WHERE project_id = ? AND kind = 'log' ORDER BY created DESC LIMIT 12", projectId),
+  ]);
+  return { hints: hints.reverse(), lessons: lessons.reverse(), log: log.reverse() };
 }
 
 async function requeueStale(env) {
@@ -121,7 +135,7 @@ async function site(req, env, url) {
     const [posts, assets, memory] = pid ? await Promise.all([
       all(env, "SELECT * FROM posts WHERE project_id = ? AND status != 'removed' ORDER BY created DESC LIMIT 60", pid),
       all(env, "SELECT * FROM assets WHERE project_id = ? ORDER BY created", pid),
-      all(env, "SELECT * FROM memory WHERE project_id = ? ORDER BY created DESC LIMIT 200", pid),
+      all(env, "SELECT * FROM memory WHERE project_id = ? ORDER BY pinned DESC, created DESC LIMIT 300", pid),
     ]) : [[], [], []];
     const queue = await one(env, "SELECT COUNT(*) AS n FROM posts WHERE status IN ('queued', 'working')");
     return json({ projects, project: pid, posts: posts.map(postOut), assets: assets.map(assetOut), memory, queue: queue.n, storage: await storage(env) });
@@ -191,13 +205,13 @@ async function site(req, env, url) {
     } else if (act === "caption") {
       const caption = String(body.caption || "").slice(0, 2200);
       await run(env, "UPDATE posts SET caption = ?, hashtags = '[]', updated = ? WHERE id = ?", caption, t, post.id);
-      await remember(env, post.project_id, "feedback", `The owner rewrote the caption of "${post.headline}". Their version starts: ${caption.slice(0, 300)}`);
+      await remember(env, post.project_id, "feedback", `The owner rewrote the caption of "${post.headline}". Their version starts: ${caption.slice(0, 300)}`, "feedback");
     } else if (act === "approve") {
       await run(env, "UPDATE posts SET status = 'approved', updated = ? WHERE id = ?", t, post.id);
-      await remember(env, post.project_id, "feedback", `The owner approved: "${post.headline}" (${post.aspect}).`);
+      await remember(env, post.project_id, "feedback", `The owner approved: "${post.headline}" (${post.aspect}).`, "feedback");
     } else if (act === "remove") {
       await run(env, "UPDATE posts SET status = 'removed', updated = ? WHERE id = ?", t, post.id);
-      if (post.headline) await remember(env, post.project_id, "feedback", `The owner rejected: "${post.headline}"${body.reason ? ` because: ${String(body.reason).slice(0, 200)}` : ""}.`);
+      if (post.headline) await remember(env, post.project_id, "feedback", `The owner rejected: "${post.headline}"${body.reason ? ` because: ${String(body.reason).slice(0, 200)}` : ""}.`, "feedback");
       await Promise.all([deleteFile(env, post.post_key), deleteFile(env, post.background_key)]);
       await run(env, "UPDATE posts SET post_key = '', background_key = '', bytes = 0 WHERE id = ?", post.id);
     } else {
@@ -239,12 +253,19 @@ async function site(req, env, url) {
   }
 
   if (p === "/api/memory" && m === "POST") {
-    await remember(env, String(body.project_id || ""), "you", body.note);
+    // Your notes are rules; highlighted unless you say otherwise.
+    await remember(env, String(body.project_id || ""), "you", body.note, "rule", body.pinned === false ? 0 : 1);
     return json({ ok: true });
   }
-  if ((mm = p.match(/^\/api\/memory\/([\w-]+)$/)) && m === "DELETE") {
-    await run(env, "DELETE FROM memory WHERE id = ?", mm[1]);
-    return json({ ok: true });
+  if ((mm = p.match(/^\/api\/memory\/([\w-]+)$/))) {
+    if (m === "DELETE") {
+      await run(env, "DELETE FROM memory WHERE id = ?", mm[1]);
+      return json({ ok: true });
+    }
+    if (m === "PUT") {
+      await run(env, "UPDATE memory SET pinned = ? WHERE id = ?", body.pinned ? 1 : 0, mm[1]);
+      return json({ ok: true });
+    }
   }
 
   return fail("Not found.", 404);
@@ -272,14 +293,14 @@ async function agent(req, env, url) {
     const [project, assets, memory, recent] = await Promise.all([
       one(env, "SELECT * FROM projects WHERE id = ?", post.project_id),
       all(env, "SELECT * FROM assets WHERE project_id = ?", post.project_id),
-      all(env, "SELECT source, note FROM memory WHERE project_id = ? ORDER BY created DESC LIMIT 60", post.project_id),
+      memoryForBrain(env, post.project_id),
       all(env, "SELECT headline FROM posts WHERE project_id = ? AND headline != '' AND id != ? ORDER BY created DESC LIMIT 25", post.project_id, post.id),
     ]);
     return json({
       job: postOut(post),
       project: projectOut(project),
       assets: assets.map(assetOut),
-      memory: memory.reverse(),
+      memory,
       recent_headlines: recent.map((r) => r.headline),
     });
   }
@@ -310,7 +331,12 @@ async function agent(req, env, url) {
       image_prompt = ?, post_key = ?, background_key = ?, bytes = ?, updated = ? WHERE id = ?`,
       String(data.headline ?? post.headline), String(data.subtext ?? post.subtext), String(data.caption ?? post.caption),
       JSON.stringify(data.hashtags ?? parse(post.hashtags, [])), String(data.image_prompt ?? post.image_prompt), postKey, bgKey, bytes, t, post.id);
-    for (const note of (data.learned || []).slice(0, 3)) await remember(env, post.project_id, "brain", note);
+    // The brain's own notes: a dated log line for every job, its lessons, and at most one highlighted hint.
+    const what = { new: "Made", picture: "Made a new picture for", text: "Rewrote the words of" }[post.job] || "Made";
+    await remember(env, post.project_id, "brain",
+      `${what} post "${String(data.headline ?? post.headline)}" (${post.aspect})${post.topic ? ` about: ${post.topic.slice(0, 160)}` : " from the brief topics"}.`, "log");
+    for (const note of (data.learned || []).slice(0, 2)) await remember(env, post.project_id, "brain", note, "lesson");
+    if (data.hint) await remember(env, post.project_id, "brain", data.hint, "hint", 1);
     return json({ ok: true });
   }
 

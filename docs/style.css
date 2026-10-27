@@ -205,3 +205,14 @@ nav { flex-wrap: wrap; }
   .project-bar select { min-width: 0; flex: 1; }
   .project-bar { width: 100%; }
 }
+
+/* ---- memory notes ---- */
+.memory { align-items: center; }
+.memory.pinned { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); background: color-mix(in srgb, var(--warn) 7%, var(--card)); }
+.memory-body { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.memory-meta { font-size: 12px; color: var(--muted); }
+.memory-meta .chip { margin-right: 4px; }
+.star { font-size: 20px; line-height: 1; color: var(--warn); padding: 4px 6px; }
+.chip.hint, .chip.rule { color: var(--warn); }
+.chip.lesson { color: var(--ok); }
+.chip.log { color: var(--muted); }

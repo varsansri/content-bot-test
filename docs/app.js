@@ -21,6 +21,7 @@ let aspect = store.get("aspect", "4:5");
 let logoChoice = ""; // asset id, "none", or "" for the project default
 let editing = null;
 let pollTimer = null;
+let memFilter = store.get("memFilter", "pinned");
 
 // ---------- server ----------
 
@@ -233,13 +234,27 @@ function renderAssets() {
   }).join("") || `<p class="muted center">No assets yet. Add the project's logo above.</p>`;
 }
 
+const MEM_KIND = { hint: "Hint", rule: "Your rule", lesson: "Lesson", feedback: "Your feedback", log: "Work log" };
+const memMatch = (m) => memFilter === "all" || (memFilter === "pinned" ? m.pinned : !m.pinned && m.kind === memFilter);
+
 function renderMemory() {
-  const SRC = { you: "You", brain: "Brain", feedback: "Your feedback" };
-  $("#memory-list").innerHTML = state.memory.map((m) => `<div class="memory" data-id="${esc(m.id)}">
-      <span class="chip ${esc(m.source)}">${SRC[m.source] || esc(m.source)}</span>
-      <span class="memory-note">${esc(m.note)}</span>
+  const mem = state.memory;
+  const counts = { pinned: mem.filter((m) => m.pinned).length, all: mem.length };
+  for (const k of ["lesson", "feedback", "log"]) counts[k] = mem.filter((m) => !m.pinned && m.kind === k).length;
+  document.querySelectorAll("#memory-filters button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mf === memFilter);
+    b.querySelector("span").textContent = counts[b.dataset.mf] ? `(${counts[b.dataset.mf]})` : "";
+  });
+  const list = mem.filter(memMatch);
+  $("#memory-list").innerHTML = list.map((m) => `<div class="memory ${m.pinned ? "pinned" : ""}" data-id="${esc(m.id)}">
+      <button class="ghost star small-btn" data-mem-act="pin" aria-label="${m.pinned ? "Remove highlight" : "Highlight"}" title="${m.pinned ? "Highlighted: always followed" : "Highlight it"}">${m.pinned ? "★" : "☆"}</button>
+      <div class="memory-body">
+        <span class="memory-note">${esc(m.note)}</span>
+        <span class="memory-meta"><span class="chip ${esc(m.kind)}">${MEM_KIND[m.kind] || esc(m.kind)}</span>
+          ${m.source === "brain" ? "by the brain" : m.source === "you" ? "by you" : "from your review"} · ${esc(new Date(m.created).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}</span>
+      </div>
       <button class="ghost danger small-btn" data-mem-act="delete" aria-label="Delete">✕</button></div>`).join("") ||
-    `<p class="muted center">Nothing remembered yet. It fills up as you approve, reject and edit posts.</p>`;
+    `<p class="muted center">${memFilter === "pinned" ? "Nothing highlighted yet. The brain stars important hints by itself, or star any note." : "Nothing here yet. It fills up as the brain makes posts and you review them."}</p>`;
 }
 
 const FIELDS = [
@@ -554,13 +569,27 @@ function init() {
   $("#memory-add").addEventListener("click", () => busy($("#memory-add"), async () => {
     const note = $("#memory-note").value.trim();
     if (!note) throw new Error("Write something to remember.");
-    await api("/api/memory", { method: "POST", body: { project_id: projectId, note } });
+    await api("/api/memory", { method: "POST", body: { project_id: projectId, note, pinned: $("#memory-pin").checked } });
     $("#memory-note").value = "";
     await refresh();
   }));
   $("#memory-list").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-mem-act]");
-    if (btn) busy(btn, async () => { await api(`/api/memory/${btn.closest(".memory").dataset.id}`, { method: "DELETE" }); await refresh(); });
+    if (!btn) return;
+    const id = btn.closest(".memory").dataset.id;
+    const m = state.memory.find((x) => x.id === id);
+    busy(btn, async () => {
+      if (btn.dataset.memAct === "pin") await api(`/api/memory/${id}`, { method: "PUT", body: { pinned: !m.pinned } });
+      else await api(`/api/memory/${id}`, { method: "DELETE" });
+      await refresh();
+    });
+  });
+  $("#memory-filters").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-mf]");
+    if (!b) return;
+    memFilter = b.dataset.mf;
+    store.set("memFilter", memFilter);
+    renderMemory();
   });
 
   $("#brief-save").addEventListener("click", onBriefSave);

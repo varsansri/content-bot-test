@@ -21,6 +21,8 @@ import time
 import traceback
 import urllib.request
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import content
 import images
@@ -120,6 +122,21 @@ def brand_for(project, assets, job):
     return brief, logo
 
 
+def memory_text(memory, tz):
+    """The project's memory as dated lines, highlighted hints first, so the brain finds what matters fast."""
+    def line(m):
+        when = datetime.fromisoformat(m["created"].replace("Z", "+00:00")).astimezone(tz).strftime("%d %b %Y %H:%M")
+        return f"- [{when}] {m['note']}"
+    parts = []
+    if memory.get("hints"):
+        parts.append("KEY HINTS AND RULES (highlighted; always follow these first):\n" + "\n".join(line(m) for m in memory["hints"]))
+    if memory.get("lessons"):
+        parts.append("Lessons and the owner's feedback (newest last):\n" + "\n".join(f"{line(m)}{' (feedback)' if m['kind'] == 'feedback' else ''}" for m in memory["lessons"]))
+    if memory.get("log"):
+        parts.append("Your recent work log (what you made, when):\n" + "\n".join(line(m) for m in memory["log"]))
+    return "\n\n".join(parts)
+
+
 def write_text(brand, job, folder, memory, recent, references, photo_file):
     if job.get("topic"):
         ask = f"Write a post about: {job['topic']}"
@@ -127,8 +144,11 @@ def write_text(brand, job, folder, memory, recent, references, photo_file):
         ask = "Pick a fresh angle from one of these topics and write a post:\n" + "\n".join(f"- {t}" for t in brand.get("topics", []))
     if recent:
         ask += "\n\nDo not repeat these recent headlines or their ideas:\n" + "\n".join(f"- {h}" for h in recent)
-    if memory:
-        ask += "\n\nWhat you have learned about this project so far (follow it):\n" + "\n".join(f"- [{m['source']}] {m['note']}" for m in memory)
+    tz = ZoneInfo(brand.get("timezone") or "Asia/Kolkata")
+    remembered = memory_text(memory, tz)
+    if remembered:
+        ask += "\n\nYOUR MEMORY OF THIS PROJECT:\n" + remembered
+    ask += f"\n\nNow is {datetime.now(tz).strftime('%A %d %b %Y %H:%M')}."
     if references:
         ask += "\n\nReference files in the current folder (look at them for style and facts):\n" + "\n".join(f"- {n}: {note}" for n, note in references)
     if photo_file:
@@ -136,8 +156,9 @@ def write_text(brand, job, folder, memory, recent, references, photo_file):
     ask += "\n\nYou may search the web for current facts or trends if it helps. Do not create or change any files."
     prompt = (content._system_prompt(brand) + "\n\n" + ask +
               "\n\nReply with ONLY one JSON object with exactly these keys: topic, headline, subtext, caption, hashtags (a list), "
-              "image_prompt, learned (a list of 0-2 short new lessons about what this owner likes, taken from the feedback above; "
-              "[] if nothing new). No other text.")
+              "image_prompt, learned (a list of 0-2 short NEW lessons about what this owner likes, taken from the feedback above; "
+              "[] if nothing new), hint (ONE short new rule worth highlighting so the next post comes out right, for example a "
+              "picture style the owner keeps approving; \"\" unless it is new, important and not already in your key hints). No other text.")
     reply = agy(prompt, folder)
     start, end = reply.find("{"), reply.rfind("}")
     if start < 0 or end < start:
@@ -151,6 +172,7 @@ def write_text(brand, job, folder, memory, recent, references, photo_file):
         seen.setdefault(t.lower(), t)  # one of each, whatever the capitals
     post["hashtags"] = list(seen.values())[:30]
     post["learned"] = [str(x) for x in post.get("learned") or []][:2]
+    post["hint"] = str(post.get("hint") or "").strip()[:300]
     return post
 
 
@@ -233,7 +255,7 @@ def do_job(task):
         else:
             background = make_picture(post.get("image_prompt") or post.get("headline", ""), brand, job["aspect"], folder, references)
         post_jpg = images.compose(background, post["headline"], post.get("subtext", ""), brand, job["aspect"])
-        data = {k: post.get(k) for k in ("headline", "subtext", "caption", "hashtags", "image_prompt", "learned")}
+        data = {k: post.get(k) for k in ("headline", "subtext", "caption", "hashtags", "image_prompt", "learned", "hint")}
         call(f"/api/agent/result/{job['id']}", {"data": json.dumps(data)}, {"post": post_jpg, "background": jpeg(background)}, timeout=120)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
