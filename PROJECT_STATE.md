@@ -26,7 +26,7 @@ An Instagram content bot. You give it instructions on a **website** (GitHub Page
 - Cloudflare worker `cloudflare/worker.js` holds everything: D1 `mi-media-lab` (projects, assets, posts, memory, helper; schema in cloudflare/schema.sql) + KV `mi-media-lab-files` (all files). GitHub is no longer used by the site.
 - Site tabs: project picker + Create / Assets / Memory / Brief / Storage. Memory = notes the brain reads before every post (you / brain lessons / feedback from approve, reject, caption edits).
 - `pc_helper.py` now only: POST /api/agent/next every 20 s -> agy text + picture -> compose -> upload -> delete job files. Low priority. Config ~/.mi-media-lab/config.json (url + AGENT_TOKEN). Heartbeat reports PC storage.
-- Projects: Reaching Dreams (2 logos, brief) and Mi Media (empty brief, no logo yet).
+- Projects: Reaching Dreams (2 logos, brief) and Mi Media (2 Mi Media Labs logos, mark = default; about filled; voice/topics still to fill). Mi Media Labs' real site was mimedialabs.com (Coimbatore agency, now suspended); logo taken from its 2023 Internet Archive copy, writing recoloured white. mimedialabs.in was only ever parked, now a casino page; mimedia.in is a different company.
 - Test post "Write your goals down. Here is why." made end to end through the site (~3 min).
 - Old GitHub `bot` workflow still has its schedule on (auto mode blocked disabling it): `! gh workflow disable bot.yml -R varsansri/content-bot-test`.
 - Next: Zernio (posting/scheduling), Higgsfield (video), later swap the brain to an API key.
