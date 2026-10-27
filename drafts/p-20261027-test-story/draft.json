@@ -6,8 +6,21 @@
   "own_photo": false,
   "photo_file": "",
   "slot": null,
-  "status": "queued",
-  "pc_job": "new",
-  "updated": "2026-10-27T04:31:13+00:00",
-  "pc_started": "2026-10-27T04:31:13+00:00"
+  "status": "draft",
+  "updated": "2026-10-27T04:33:12+00:00",
+  "headline": "Brew the coffee. Build the dream.",
+  "subtext": "Every big business started with one quiet morning of hard work.",
+  "caption": "Running a business is tough, especially before your morning caffeine kicks in.\n\nTake a minute. Enjoy your coffee. Remember why you started.\n\nYou do not need to solve every problem today. Just pick one important task and do it well. Small daily wins create massive long-term success.\n\nWhat is your top focus for today? Drop it in the comments below ☕",
+  "hashtags": [
+    "#yourbrand",
+    "#smallbusinessowner",
+    "#morningmotivation",
+    "#solopreneurlife",
+    "#coffeefirst",
+    "#smallbizdaily",
+    "#entrepreneurmindset",
+    "#dailyfocus",
+    "#businessgrowth"
+  ],
+  "image_prompt": "A warm, sunlit wooden desk beside a window in the early morning. A steaming ceramic coffee mug rests next to an open notebook and pen. Soft golden sunrise light filters through sheer curtains, with indoor potted plants gently blurred in the background. Calm, cozy, and inspiring atmosphere."
 }
