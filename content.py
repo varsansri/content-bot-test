@@ -2,8 +2,6 @@
 import base64
 import json
 
-import anthropic
-
 MODEL = "claude-opus-5-5"
 
 POST_SCHEMA = {
@@ -26,6 +24,7 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
+        import anthropic  # only needed when Claude writes (the PC helper uses Antigravity)
         _client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
     return _client
 
