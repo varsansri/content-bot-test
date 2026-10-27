@@ -1,12 +1,25 @@
 {
   "id": "p-20261027-test-agy2",
   "created": "2026-10-27T04:07:19+00:00",
-  "topic": "3 habits that help small businesses grow on Instagram",
+  "topic": "3 habits for small business growth on Instagram",
   "own_photo": false,
   "photo_file": "",
   "slot": null,
-  "status": "queued",
-  "pc_job": "new",
-  "updated": "2026-10-27T04:07:23+00:00",
-  "pc_started": "2026-10-27T04:07:23+00:00"
+  "status": "draft",
+  "updated": "2026-10-27T04:09:55+00:00",
+  "headline": "3 Daily Habits To Grow Your Business",
+  "subtext": "Simple routines that turn casual followers into loyal paying customers.",
+  "caption": "Most small businesses post and pray.\n\nHere are 3 habits that actually bring results:\n\n1. Reply within one hour. Fast replies build trust. People buy from businesses that answer quickly.\n\n2. Show your process every week. Share behind-the-scenes moments. Stories make this simple and relatable.\n\n3. Give value before you sell. Share a quick tip or solve a daily problem for your audience.\n\nGrowth takes consistency, not luck. Focus on serving your community every day.\n\nWhich of these habits do you need to start today? Tell us below 👇",
+  "hashtags": [
+    "#yourbrand",
+    "#smallbusinessgrowth",
+    "#instagramtipsforsmallbusiness",
+    "#smallbiztips",
+    "#instagramgrowthtips",
+    "#socialmediamarketingtips",
+    "#growyourbusinessonline",
+    "#smallbusinesssupport",
+    "#contentstrategytips"
+  ],
+  "image_prompt": "A bright boutique workspace with natural morning sunlight streaming across a wooden desk, a ceramic cup of coffee, a small green potted plant, and soft neutral tones in a modern minimalist setting"
 }
