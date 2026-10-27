@@ -1,7 +1,0 @@
-{
-  "id": "p-20261026-test-0001",
-  "created": "2026-10-26T10:21:58+00:00",
-  "status": "failed",
-  "error": "The ANTHROPIC_API_KEY secret is missing. Add it in GitHub: Settings → Secrets and variables → Actions.",
-  "updated": "2026-10-26T10:21:58+00:00"
-}
