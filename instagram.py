@@ -51,14 +51,15 @@ def upload_public(jpeg_bytes):
     return data["data"]["url"]
 
 
-def publish(token, jpeg_bytes, caption):
-    """Post the picture. Returns the post's link."""
+def publish(token, jpeg_bytes, caption, story=False):
+    """Post the picture (to the feed, or as a story for 9:16). Returns the post's link."""
     user_id, _ = whoami(token)
     image_url = upload_public(jpeg_bytes)
 
     container = _check(requests.post(
         f"{GRAPH}/{user_id}/media",
-        data={"image_url": image_url, "caption": caption, "access_token": token},
+        data={"image_url": image_url, "access_token": token,
+              **({"media_type": "STORIES"} if story else {"caption": caption})},
         timeout=60,
     ))["id"]
 

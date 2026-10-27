@@ -8,20 +8,22 @@ import urllib.parse
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-W, H = 1080, 1350  # Instagram 4:5 portrait
+W, H = 1080, 1350  # Instagram 4:5 portrait (the default)
+SIZES = {"4:5": (1080, 1350), "1:1": (1080, 1080), "9:16": (1080, 1920)}
+SHAPE_WORDS = {"4:5": "Vertical portrait composition", "1:1": "Square composition", "9:16": "Tall vertical 9:16 composition"}
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---------- background picture ----------
 
-def generate_background(prompt, brand):
+def generate_background(prompt, brand, aspect="4:5"):
     """Return a PIL image. Tries Cloudflare (free tier), then Pollinations if it has a token.
 
     Pollinations without a token adds its own watermark and makes small pictures, so it is skipped.
     """
     style = brand.get("image_style", "")
     avoid = brand.get("image_avoid", "text, letters, words, watermark, logo")
-    full_prompt = f"{prompt}. Style: {style}. Vertical portrait composition. No {avoid}."[:2000]
+    full_prompt = f"{prompt}. Style: {style}. {SHAPE_WORDS.get(aspect, SHAPE_WORDS['4:5'])}. No {avoid}."[:2000]
 
     errors = []
     if os.getenv("CLOUDFLARE_ACCOUNT_ID") and os.getenv("CLOUDFLARE_API_TOKEN"):
@@ -108,8 +110,9 @@ def _fit_text(draw, text, font_path, max_width, max_height, start, smallest):
     return font, _wrap(draw, text, font, max_width), int(smallest * 1.15)
 
 
-def compose(background, headline, subtext, brand):
+def compose(background, headline, subtext, brand, aspect="4:5"):
     """Return JPEG bytes: background + dark fade + headline + subtext + logo + handle."""
+    W, H = SIZES.get(aspect, SIZES["4:5"])
     colors = brand.get("colors", {})
     fonts = brand.get("fonts", {})
     pad = 72
@@ -139,7 +142,7 @@ def compose(background, headline, subtext, brand):
     # Brand handle at the very bottom.
     handle = brand.get("instagram_handle", "")
     handle_font = _font(fonts.get("body", ""), 30)
-    bottom = H - pad
+    bottom = H - pad - (230 if aspect == "9:16" else 0)  # stories: keep clear of Instagram's reply bar
     if handle:
         draw.text((pad, bottom), handle, font=handle_font, fill=text_color, anchor="ls")
         bottom -= 70
@@ -153,7 +156,7 @@ def compose(background, headline, subtext, brand):
         bottom -= 40
 
     # Headline above the subtext, as big as fits.
-    head_font, head_lines, head_lh = _fit_text(draw, headline, fonts.get("headline", ""), max_w, 420, 104, 52)
+    head_font, head_lines, head_lh = _fit_text(draw, headline, fonts.get("headline", ""), max_w, min(420, int(H * 0.31)), 104, 52)
     for line in reversed(head_lines):
         draw.text((pad, bottom), line, font=head_font, fill=text_color, anchor="ls")
         bottom -= head_lh
@@ -169,7 +172,7 @@ def compose(background, headline, subtext, brand):
         logo = Image.open(logo_path).convert("RGBA")
         lw = int(logo_cfg.get("width", 180))
         logo = logo.resize((lw, int(logo.height * lw / logo.width)), Image.LANCZOS)
-        margin = 56
+        margin = 56 + (150 if aspect == "9:16" else 0)  # stories: below Instagram's top bar
         pos = logo_cfg.get("position", "top-left")
         x = margin if "left" in pos else W - logo.width - margin
         y = margin if "top" in pos else H - logo.height - margin

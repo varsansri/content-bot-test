@@ -17,10 +17,17 @@ An Instagram content bot. You give it instructions on a **website** (GitHub Page
 | Code | `C:\Users\varsa\instagram-content-bot` (git, branch `main`) |
 | Handover zip | `C:\Users\varsa\instagram-content-bot.zip` (no keys inside) |
 | Test repo (public) | https://github.com/varsansri/content-bot-test |
-| **Website (27 Oct)** | https://mi-media-content-lab.thebeliverone.workers.dev (Cloudflare worker `cloudflare/worker.js` + `wrangler.jsonc`, serves `docs/`; password in `~/mi-media-lab-password.txt`; `~/labkeys.sh` resets password + GitHub key; deploy `npx wrangler deploy`). Not committed/pushed yet. |
+| **Website (27 Oct)** | https://mi-media-content-lab.thebeliverone.workers.dev (Cloudflare worker `cloudflare/worker.js` + `wrangler.jsonc`, serves `docs/`; password in `~/mi-media-lab-password.txt`; `~/labkeys.sh` resets password + GitHub key; deploy `npx wrangler deploy`). Pushed to main 27 Oct. |
 | Old test website | https://varsansri.github.io/content-bot-test/ (token screen; replaced by the one above) |
 | Drafts | `drafts` branch of the repo |
 | Setup guide for the recipient | `README.md` |
+
+## Antigravity PC helper (27 Oct, LIVE, verified)
+- No AI keys are set on GitHub, so run.py queues new/text/picture jobs (status "queued", `pc_job`).
+- `pc_helper.py` on this PC polls the drafts branch every 15 s, asks `agy -p --mode accept-edits` (no yes/no prompts) for the JSON text and the picture (it saves under ~/.gemini/antigravity-cli/brain), draws the brand frame with images.py, pushes to drafts.
+- Start it: double-click `Desktop\Mi Media Lab helper.bat`. Run only ONE helper at a time. PC off = posts wait as "Waiting for your PC".
+- Test p-20261027-test-agy2: about 3 minutes, good picture + caption. p-...-agy1 failed (missing anthropic import, fixed).
+- Not handled yet: auto-post for scheduled slots made on the PC; posting to Instagram (no keys).
 
 ## Done and verified
 - The post design is checked visually: logo, headline, subtext, @handle and accent bar on a 1080×1350 picture.

@@ -19,7 +19,7 @@
 
   <main>
     <!-- Log in -->
-    <form id="setup" class="panel" hidden>
+    <form id="setup" class="panel narrow" hidden>
       <h2>Log in</h2>
       <label>Password <input id="login-pass" type="password" autocomplete="current-password"></label>
       <button id="login-go" class="primary wide">Log in</button>
@@ -28,35 +28,71 @@
 
     <!-- Posts -->
     <section id="posts" hidden>
-      <div class="panel">
-        <div class="status-line">
-          <span id="schedule-text" class="muted"></span>
-          <label class="switch"><input type="checkbox" id="auto-toggle"><span>Auto-post</span></label>
+      <div class="panel create">
+        <h2>Create posts</h2>
+        <label>What should the posts be about?
+          <textarea id="new-topic" rows="3" placeholder="e.g. Diwali offers for our customers. Leave empty and the bot picks one of your brand topics."></textarea>
+        </label>
+
+        <div class="opts">
+          <div class="opt">
+            <span class="opt-label">How many posts</span>
+            <div class="stepper">
+              <button type="button" id="count-minus" aria-label="Fewer posts">−</button>
+              <output id="count">1</output>
+              <button type="button" id="count-plus" aria-label="More posts">+</button>
+            </div>
+          </div>
+          <div class="opt">
+            <span class="opt-label">Size</span>
+            <div class="sizes" id="sizes">
+              <button type="button" class="size on" data-aspect="4:5"><i class="shape s45"></i><b>Portrait</b><small>4:5 · feed</small></button>
+              <button type="button" class="size" data-aspect="1:1"><i class="shape s11"></i><b>Square</b><small>1:1 · feed</small></button>
+              <button type="button" class="size" data-aspect="9:16"><i class="shape s916"></i><b>Story</b><small>9:16</small></button>
+            </div>
+          </div>
         </div>
-        <label>What should the post be about?
-          <textarea id="new-topic" rows="2" placeholder="e.g. 5 mistakes new traders make — or leave empty for one of the brand topics"></textarea>
-        </label>
-        <label class="file">Your own photo (optional)
+
+        <details class="own">
+          <summary>Use my own photo (optional)</summary>
           <input id="new-photo" type="file" accept="image/*">
-        </label>
-        <button id="new-go" class="primary wide">Make post</button>
-        <p class="muted small">Each action takes about a minute. You can close the page and come back.</p>
+          <p class="muted small">With your own photo the bot makes one post and only writes the words.</p>
+        </details>
+
+        <button id="new-go" class="primary wide big">Make 1 post</button>
+        <p class="muted small center">Your PC makes posts one by one, about 3 minutes each. You can close this page and come back.</p>
+      </div>
+
+      <div class="filters" id="filters">
+        <button data-filter="review" class="on">To review <span></span></button>
+        <button data-filter="posted">Posted <span></span></button>
+        <button data-filter="all">All <span></span></button>
       </div>
       <div id="list" class="list"></div>
-      <p id="empty" class="muted center" hidden>No posts yet. Make your first one above.</p>
+      <p id="empty" class="muted center" hidden>Nothing here yet.</p>
     </section>
 
     <!-- Brand -->
-    <section id="brand" class="panel" hidden>
-      <h2>Brand look and voice</h2>
-      <div class="logo-row">
-        <img id="logo-img" alt="Current logo">
-        <label class="file">Change logo (PNG, transparent background is best)
-          <input id="logo-file" type="file" accept="image/png">
-        </label>
+    <section id="brand" hidden>
+      <div class="panel">
+        <h2>Daily posts</h2>
+        <div class="status-line">
+          <span id="schedule-text" class="muted"></span>
+          <label class="switch"><input type="checkbox" id="auto-toggle"><span>Post automatically</span></label>
+        </div>
+        <p class="muted small">Off: the daily posts wait in "To review" for you. On: they go to Instagram without asking.</p>
       </div>
-      <form id="brand-form"></form>
-      <button id="brand-save" class="primary wide">Save brand</button>
+      <div class="panel">
+        <h2>Brand look and voice</h2>
+        <div class="logo-row">
+          <img id="logo-img" alt="Current logo">
+          <label class="file">Change logo (PNG, transparent background is best)
+            <input id="logo-file" type="file" accept="image/png">
+          </label>
+        </div>
+        <form id="brand-form"></form>
+        <button id="brand-save" class="primary wide">Save brand</button>
+      </div>
     </section>
   </main>
 

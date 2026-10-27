@@ -112,3 +112,40 @@ button:disabled { opacity: .5; cursor: default; }
   .grid2 { grid-template-columns: 1fr; }
   .top { flex-wrap: wrap; }
 }
+
+/* ---- create panel, filters, wider list ---- */
+main { max-width: 980px; }
+.narrow { max-width: 420px; margin: 40px auto; }
+h3 { font-size: 15px; margin: 24px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
+#brand-form h3:first-child { border-top: 0; padding-top: 0; margin-top: 8px; }
+.create { max-width: 640px; margin: 0 auto 20px; }
+.opts { display: flex; flex-wrap: wrap; gap: 16px 28px; margin: 8px 0 12px; }
+.opt-label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stepper button { border: 0; border-radius: 0; width: 44px; height: 44px; font-size: 20px; padding: 0; background: var(--bg); }
+.stepper output { min-width: 44px; text-align: center; font-weight: 700; font-size: 18px; }
+.sizes { display: flex; gap: 8px; flex-wrap: wrap; }
+.size { display: grid; justify-items: center; gap: 2px; width: 92px; padding: 10px 6px; background: var(--bg); }
+.size b { font-size: 14px; }
+.size small { color: var(--muted); font-size: 11px; }
+.size .shape { display: block; height: 30px; border: 2px solid var(--muted); border-radius: 3px; margin-bottom: 4px; }
+.shape.s45 { aspect-ratio: 4 / 5; }
+.shape.s11 { aspect-ratio: 1 / 1; }
+.shape.s916 { aspect-ratio: 9 / 16; }
+.size.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: var(--card); }
+.size.on .shape { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.own { margin: 4px 0 14px; }
+.own summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--accent); }
+.own input { margin-top: 8px; }
+.big { padding: 14px; font-size: 17px; }
+
+.filters { display: flex; gap: 6px; margin: 0 0 14px; flex-wrap: wrap; }
+.filters button { border-radius: 99px; padding: 6px 14px; font-size: 14px; }
+.filters button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+.filters span { opacity: .7; }
+
+.list { grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); align-items: start; }
+.card .pic { aspect-ratio: auto; }
+.btn { display: block; text-align: center; text-decoration: none; font-size: 15px; border-radius: 10px; padding: 10px 14px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+.card .actions + .actions { margin-top: 8px; }
+.card .actions button, .card .actions .btn { font-size: 14px; padding: 9px 8px; }

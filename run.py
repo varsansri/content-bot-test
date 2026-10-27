@@ -98,7 +98,7 @@ def render(draft, brand, background):
     background.save(buf, "JPEG", quality=95)
     write_bytes(draft_path(draft["id"], "background.jpg"), buf.getvalue())
     write_bytes(draft_path(draft["id"], "post.jpg"),
-                images.compose(background, draft["headline"], draft["subtext"], brand))
+                images.compose(background, draft["headline"], draft["subtext"], brand, draft.get("aspect", "4:5")))
 
 
 def has_text_ai():
@@ -117,9 +117,10 @@ def queue_for_pc(draft, job):
     return draft
 
 
-def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None):
+def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None, aspect=None):
+    aspect = aspect if aspect in ("4:5", "1:1", "9:16") else brand.get("aspect", "4:5")
     if not has_text_ai() or (not photo_file and not has_picture_ai()):
-        return queue_for_pc({"id": draft_id, "created": stamp(), "topic": topic or "",
+        return queue_for_pc({"id": draft_id, "created": stamp(), "topic": topic or "", "aspect": aspect,
                              "own_photo": bool(photo_file), "photo_file": photo_file or "", "slot": slot}, "new")
 
     import content
@@ -128,14 +129,14 @@ def make_draft(draft_id, brand, topic=None, photo_file=None, slot=None):
 
     photo = read_bytes(os.path.join(DATA, photo_file)) if photo_file else None
     draft = {"id": draft_id, "status": "working", "created": stamp(), "topic": topic or "",
-             "own_photo": bool(photo), "slot": slot}
+             "own_photo": bool(photo), "slot": slot, "aspect": aspect}
     save_draft(draft)
     post = content.write_post(brand, topic, recent_headlines(), photo)
     draft.update(post)
     if photo:
         background = Image.open(io.BytesIO(photo)).convert("RGB")
     else:
-        background = images.generate_background(post["image_prompt"], brand)
+        background = images.generate_background(post["image_prompt"], brand, aspect)
     render(draft, brand, background)
     draft["status"] = "draft"
     save_draft(draft)
@@ -146,7 +147,7 @@ def new_picture(draft, brand):
     import images
     if draft.get("own_photo"):
         raise RuntimeError("This post uses your own photo. Upload a different photo instead.")
-    render(draft, brand, images.generate_background(draft["image_prompt"], brand))
+    render(draft, brand, images.generate_background(draft["image_prompt"], brand, draft.get("aspect", "4:5")))
 
 
 def new_text(draft, brand):
@@ -174,17 +175,17 @@ def publish(draft):
     need("IMGBB_API_KEY")
     link = instagram.publish(need("INSTAGRAM_ACCESS_TOKEN"),
                              read_bytes(draft_path(draft["id"], "post.jpg")),
-                             content.full_caption(draft))
+                             content.full_caption(draft), story=draft.get("aspect") == "9:16")
     draft["status"] = "posted"
     draft["posted"] = stamp()
     draft["permalink"] = link
 
 
-def do_action(action, draft_id, topic="", caption="", photo=""):
+def do_action(action, draft_id, topic="", caption="", photo="", aspect=""):
     brand = load_brand()
     if action == "new":
         try:
-            make_draft(draft_id, brand, topic or None, photo or None)
+            make_draft(draft_id, brand, topic or None, photo or None, aspect=aspect)
         except Exception as e:
             fail_new(draft_id, e)
         return
@@ -253,7 +254,8 @@ def main():
         if not draft_id or "/" in draft_id or ".." in draft_id:
             sys.exit("A valid ID is needed.")
         do_action(os.environ.get("ACTION", "").strip(), draft_id,
-                  os.environ.get("TOPIC", ""), os.environ.get("CAPTION", ""), os.environ.get("PHOTO", "").strip())
+                  os.environ.get("TOPIC", ""), os.environ.get("CAPTION", ""), os.environ.get("PHOTO", "").strip(),
+                  os.environ.get("ASPECT", "").strip())
     else:
         sys.exit(__doc__)
 

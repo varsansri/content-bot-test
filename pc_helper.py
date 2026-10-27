@@ -145,7 +145,12 @@ def new_pictures(since):
     return sorted(found, key=os.path.getmtime)
 
 
-def make_picture(prompt, brand):
+SHAPES = {"4:5": "Tall portrait picture, 4:5 shape (like 1080x1350)",
+          "1:1": "Square picture, 1:1 shape (like 1080x1080)",
+          "9:16": "Tall phone-screen picture, 9:16 shape (like 1080x1920)"}
+
+
+def make_picture(prompt, brand, aspect="4:5"):
     from PIL import Image
     folder = fresh_folder("picture")
     style = brand.get("image_style", "")
@@ -153,7 +158,7 @@ def make_picture(prompt, brand):
     since = time.time() - 1
     agy("Use your image generator to create ONE picture and save it in the current folder as background.png.\n"
         f"Picture: {prompt}. Style: {style}.\n"
-        f"Tall portrait picture, 4:5 shape (like 1080x1350). Leave the bottom third calm, text goes there later. "
+        f"{SHAPES.get(aspect, SHAPES['4:5'])}. Leave the bottom third calm, text goes there later. "
         f"Absolutely no {avoid}. Do not ask questions, just make it.", folder)
     # Antigravity's image helper can finish a little after agy returns; wait up to 3 more minutes.
     for _ in range(36):
@@ -182,7 +187,7 @@ def handle(draft):
         post = write_text(brand, draft.get("topic") or None, run.recent_headlines(), photo)
         draft.update(post)
         from PIL import Image
-        background = Image.open(io.BytesIO(photo)).convert("RGB") if photo else make_picture(post["image_prompt"], brand)
+        background = Image.open(io.BytesIO(photo)).convert("RGB") if photo else make_picture(post["image_prompt"], brand, draft.get("aspect", "4:5"))
     elif job == "text":
         from PIL import Image
         post = write_text(brand, draft.get("topic") or None, [draft.get("headline", "")] + run.recent_headlines(),
@@ -191,7 +196,7 @@ def handle(draft):
         draft.update(post)
         background = Image.open(background_file).convert("RGB")
     elif job == "picture":
-        background = make_picture(draft.get("image_prompt") or draft.get("headline", ""), brand)
+        background = make_picture(draft.get("image_prompt") or draft.get("headline", ""), brand, draft.get("aspect", "4:5"))
     else:
         raise RuntimeError(f"Unknown job {job!r}")
 

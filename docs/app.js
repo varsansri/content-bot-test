@@ -26,6 +26,9 @@ const imgCache = {}; // post.jpg blob sha -> object URL
 let shown = []; // [{ draft, draftSha, imgSha }]
 let pollTimer = null;
 let editing = null;
+let filter = store.get("filter", "review");
+let count = 1;
+let aspect = store.get("aspect", "4:5");
 
 // ---------- GitHub API ----------
 
@@ -87,7 +90,7 @@ async function dispatch(action, id, extra = {}) {
   for (const [k, v] of Object.entries(extra)) if (v) inputs[k] = v;
   await gh("/actions/workflows/bot.yml/dispatches", { method: "POST", body: { ref: repoInfo.default_branch, inputs } });
   const current = shown.find((s) => s.draft.id === id);
-  pending[id] = { action, sha: current ? current.draftSha : null, at: Date.now() };
+  pending[id] = { action, sha: current ? current.draftSha : null, at: Date.now(), aspect: extra.aspect };
   store.set("pending", pending);
   renderList();
   poll(5000);
@@ -166,7 +169,10 @@ function poll(delay) {
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-const STATUS = { draft: "Waiting for you", posted: "Posted", skipped: "Skipped", failed: "Failed", working: "Working", queued: "On the PC" };
+const STATUS = { draft: "Ready to review", posted: "Posted", skipped: "Skipped", failed: "Failed", working: "Working", queued: "Being made" };
+const RATIO = { "4:5": "4 / 5", "1:1": "1 / 1", "9:16": "9 / 16" };
+const SIZE_NAME = { "4:5": "Portrait", "1:1": "Square", "9:16": "Story" };
+const inReview = (d) => !["posted", "skipped"].includes(d.status);
 const ACTION_TEXT = { new: "Making the post…", post: "Posting to Instagram…", picture: "Making a new picture…", text: "Writing new text…", caption: "Saving the caption…", skip: "Skipping…" };
 
 function fullCaption(d) {
@@ -180,12 +186,19 @@ function when(d) {
 
 function renderList() {
   const list = $("#list");
-  const items = shown.filter((s) => !hidden.includes(s.draft.id));
+  const all = shown.filter((s) => !hidden.includes(s.draft.id));
   // Posts being made that have not reached GitHub yet.
   for (const [id, p] of Object.entries(pending)) {
-    if (p.action === "new" && !items.some((s) => s.draft.id === id)) items.unshift({ draft: { id, status: "working" }, ghost: true });
+    if (p.action === "new" && !all.some((s) => s.draft.id === id)) all.unshift({ draft: { id, status: "working", aspect: p.aspect }, ghost: true });
   }
+  const counts = { review: all.filter((s) => inReview(s.draft)).length, posted: all.filter((s) => s.draft.status === "posted").length, all: all.length };
+  document.querySelectorAll("#filters button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.filter === filter);
+    b.querySelector("span").textContent = counts[b.dataset.filter] ? `(${counts[b.dataset.filter]})` : "";
+  });
+  const items = all.filter((s) => filter === "all" || (filter === "posted" ? s.draft.status === "posted" : inReview(s.draft)));
   $("#empty").hidden = items.length > 0;
+  $("#empty").textContent = filter === "review" ? "Nothing to review. Make some posts above." : "Nothing here yet.";
   list.innerHTML = items.map(cardHtml).join("");
 }
 
@@ -198,11 +211,12 @@ function cardHtml({ draft: d, imgSha, ghost }) {
   const busyText = queued
     ? `${d.pc_started ? "Your PC is making it now…" : "Waiting for your PC…"}<br><span class="muted small">${d.pc_started ? "about 2 minutes" : "the PC helper must be running"}</span>`
     : busy ? `${esc(ACTION_TEXT[p.action] || "Working…")}<br><span class="muted small">about a minute</span>` : "";
+  const ratio = RATIO[d.aspect] || RATIO["4:5"];
   let html = `<article class="card" data-id="${esc(d.id)}">
-    <div class="pic">${img ? `<img src="${img}" alt="${esc(d.headline)}">` : ""}
+    <div class="pic" style="aspect-ratio: ${ratio}">${img ? `<img src="${img}" alt="${esc(d.headline)}">` : ""}
       ${busyText ? `<div class="busy">${busyText}</div>` : ""}
     </div><div class="body">
-    <span class="chip ${status}">${STATUS[status] || esc(status)}</span><span class="when">${esc(when(d))}</span>`;
+    <span class="chip ${status}">${STATUS[status] || esc(status)}</span><span class="when">${esc(SIZE_NAME[d.aspect] || "Portrait")} · ${esc(when(d))}</span>`;
   if (p && p.error) html += `<div class="err">${esc(p.error)} <a href="${esc(p.runUrl)}" target="_blank" rel="noopener">See what happened</a></div>`;
   if (d.error) html += `<div class="err">${esc(d.error)}</div>`;
   if (ghost) return html + `</div></article>`;
@@ -215,13 +229,19 @@ function cardHtml({ draft: d, imgSha, ghost }) {
     if (d.hashtags && d.hashtags.length) html += `<div class="tags">${esc(d.hashtags.join(" "))}</div>`;
   }
   if (d.status === "posted" && d.permalink) html += `<p><a href="${esc(d.permalink)}" target="_blank" rel="noopener">Open on Instagram</a></p>`;
+  if (img && d.caption && !busy && editing !== d.id && d.status !== "failed") {
+    html += `<div class="actions">
+      <a class="btn" href="${img}" download="${esc(d.id)}.jpg">⬇ Download picture</a>
+      <button data-act="copy">📋 Copy caption</button>
+    </div>`;
+  }
   if (d.status === "draft" && !busy && editing !== d.id) {
     html += `<div class="actions">
-      <button class="primary" data-act="post">✅ Post to Instagram</button>
+      <button class="primary" data-act="post">Post to Instagram</button>
       ${d.own_photo ? "" : `<button data-act="picture">🖼 New picture</button>`}
-      <button data-act="text">✍️ New text</button>
+      <button data-act="text">✍️ New words</button>
       <button data-act="edit">✏️ Edit caption</button>
-      <button class="danger" data-act="skip">Skip</button>
+      <button class="danger" data-act="skip">🗑 Remove</button>
     </div>`;
   }
   if (d.status === "failed" && !busy) html += `<div class="actions"><button data-act="retry">Try again</button><button data-act="dismiss">Hide</button></div>`;
@@ -238,6 +258,12 @@ async function onCardClick(e) {
   btn.disabled = true;
   try {
     if (act === "edit") { editing = id; renderList(); return; }
+    if (act === "copy") {
+      await navigator.clipboard.writeText(fullCaption(item.draft));
+      toast("Caption copied.");
+      btn.disabled = false;
+      return;
+    }
     if (act === "cancel-edit") { editing = null; renderList(); return; }
     if (act === "dismiss") {
       if (pending[id]) delete pending[id];
@@ -255,7 +281,7 @@ async function onCardClick(e) {
       return;
     }
     if (act === "post" && !confirmPost()) { btn.disabled = false; return; }
-    if (act === "retry") { await makePost(item ? item.draft.topic : ""); return; }
+    if (act === "retry") { await makePost(item ? item.draft.topic : "", null, item && item.draft.aspect); return; }
     await dispatch(act, id);
   } catch (err) {
     toast(err.message);
@@ -291,7 +317,7 @@ async function photoToJpegB64(file) {
   return bytesToB64(new Uint8Array(await out.arrayBuffer()));
 }
 
-async function makePost(topic, photoFile) {
+async function makePost(topic, photoFile, size = aspect) {
   const id = newId();
   let photo = "";
   if (photoFile) {
@@ -299,36 +325,58 @@ async function makePost(topic, photoFile) {
     photo = `uploads/${id}.jpg`;
     await putFile(photo, await photoToJpegB64(photoFile), `photo for ${id}`, "drafts");
   }
-  await dispatch("new", id, { topic, photo });
-  toast("Started. Your post will appear here in about a minute.");
+  await dispatch("new", id, { topic, photo, aspect: size || "4:5" });
 }
 
 async function onNewPost() {
   const btn = $("#new-go");
   btn.disabled = true;
+  const photo = $("#new-photo").files[0];
+  const n = photo ? 1 : count;
   try {
-    await makePost($("#new-topic").value.trim(), $("#new-photo").files[0]);
+    for (let i = 0; i < n; i++) {
+      btn.textContent = n > 1 ? `Starting ${i + 1} of ${n}…` : "Starting…";
+      await makePost($("#new-topic").value.trim(), photo);
+    }
+    toast(n > 1 ? `Started ${n} posts. They appear below as they are made.` : "Started. The post appears below when it is made.");
     $("#new-topic").value = "";
     $("#new-photo").value = "";
+    filter = "review";
+    store.set("filter", filter);
+    renderList();
   } catch (e) {
     toast(e.message);
   } finally {
     btn.disabled = false;
+    renderCreate();
   }
+}
+
+function renderCreate() {
+  const photo = $("#new-photo").files[0];
+  const n = photo ? 1 : count;
+  $("#count").textContent = n;
+  $("#count-minus").disabled = !!photo || count <= 1;
+  $("#count-plus").disabled = !!photo || count >= 10;
+  document.querySelectorAll("#sizes .size").forEach((b) => b.classList.toggle("on", b.dataset.aspect === aspect));
+  $("#new-go").textContent = `Make ${n} ${SIZE_NAME[aspect].toLowerCase()} post${n > 1 ? "s" : ""}`;
 }
 
 // ---------- brand ----------
 
 const FIELDS = [
+  "About the brand",
   ["brand_name", "Brand name", "text"],
   ["instagram_handle", "Instagram handle (shown on every picture)", "text"],
   ["about", "What the account is about", "area"],
+  "Captions",
   ["voice", "How the captions should sound", "area"],
   ["language", "Language", "text"],
   ["topics", "Topics for scheduled posts (one per line)", "lines"],
   ["example_captions", "Example captions you like (blank line between them)", "blocks"],
   ["always_hashtags", "Hashtags on every post", "tags"],
   ["hashtag_count", "How many extra hashtags", "number"],
+  "Picture look",
   ["image_style", "Picture style (added to every AI picture)", "area"],
   ["black_and_white", "Make every picture black and white", "bool"],
   ["colors.text", "Text colour", "color"],
@@ -337,6 +385,7 @@ const FIELDS = [
   ["overlay_strength", "Shade strength (0 to 1)", "decimal"],
   ["logo.position", "Logo position", "select:top-left,top-right,bottom-left,bottom-right"],
   ["logo.width", "Logo width in pixels (picture is 1080 wide)", "number"],
+  "Daily schedule",
   ["post_times", "Daily posting times, 24-hour (e.g. 10:00, 19:00)", "csv"],
   ["timezone", "Timezone (e.g. Asia/Kolkata)", "text"],
 ];
@@ -348,7 +397,9 @@ function setPath(obj, path, value) {
   keys.reduce((o, k) => (o[k] ||= {}), obj)[last] = value;
 }
 
-function fieldHtml([key, label, type], i) {
+function fieldHtml(field, i) {
+  if (typeof field === "string") return `<h3>${esc(field)}</h3>`;
+  const [key, label, type] = field;
   const v = getPath(brand, key);
   const name = `f${i}`;
   if (type === "area") return `<label>${label}<textarea name="${name}" rows="3">${esc(v)}</textarea></label>`;
@@ -367,7 +418,9 @@ function fieldHtml([key, label, type], i) {
   return `<label>${label}<input name="${name}" value="${esc(v)}"></label>`;
 }
 
-function readField([key, , type], i) {
+function readField(field, i) {
+  if (typeof field === "string") return undefined;
+  const type = field[2];
   const el = $(`#brand-form [name="f${i}"]`);
   const raw = type === "bool" ? el.checked : el.value;
   if (type === "lines") return raw.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -408,7 +461,7 @@ async function onBrandSave() {
   try {
     await loadBrand(); // start from the latest version
     const values = FIELDS.map(readField);
-    FIELDS.forEach(([key], i) => setPath(brand, key, values[i]));
+    FIELDS.forEach((field, i) => { if (typeof field !== "string") setPath(brand, field[0], values[i]); });
     await saveBrand("Update brand settings");
     toast("Saved. New posts use the new look.");
   } catch (e) {
@@ -435,7 +488,7 @@ async function onLogoPick(e) {
 
 function renderSchedule() {
   const times = (brand.post_times || []).join(", ");
-  $("#schedule-text").textContent = times ? `Daily at ${times} (${brand.timezone || "UTC"})` : "No daily schedule";
+  $("#schedule-text").textContent = times ? `A new post every day at ${times} (${brand.timezone || "UTC"})` : "No daily posts";
   $("#auto-toggle").checked = !!brand.auto_post;
 }
 
@@ -524,6 +577,24 @@ function init() {
   $("#setup").addEventListener("submit", onLogin);
   $("#logout").addEventListener("click", onLogout);
   $("#new-go").addEventListener("click", onNewPost);
+  $("#count-minus").addEventListener("click", () => { count = Math.max(1, count - 1); renderCreate(); });
+  $("#count-plus").addEventListener("click", () => { count = Math.min(10, count + 1); renderCreate(); });
+  $("#new-photo").addEventListener("change", renderCreate);
+  $("#sizes").addEventListener("click", (e) => {
+    const b = e.target.closest(".size");
+    if (!b) return;
+    aspect = b.dataset.aspect;
+    store.set("aspect", aspect);
+    renderCreate();
+  });
+  $("#filters").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-filter]");
+    if (!b) return;
+    filter = b.dataset.filter;
+    store.set("filter", filter);
+    renderList();
+  });
+  renderCreate();
   $("#list").addEventListener("click", onCardClick);
   $("#brand-save").addEventListener("click", onBrandSave);
   $("#logo-file").addEventListener("change", onLogoPick);

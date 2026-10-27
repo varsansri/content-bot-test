@@ -20,6 +20,9 @@ on:
       photo:
         description: Uploaded photo path on the drafts branch (new only)
         default: ""
+      aspect:
+        description: "Picture shape: 4:5 | 1:1 | 9:16 (new only)"
+        default: ""
   schedule:
     - cron: "7,37 * * * *" # checks twice an hour whether a post_times slot is due
 
@@ -77,6 +80,7 @@ jobs:
           TOPIC: ${{ inputs.topic }}
           CAPTION: ${{ inputs.caption }}
           PHOTO: ${{ inputs.photo }}
+          ASPECT: ${{ inputs.aspect }}
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then python run.py schedule; else python run.py action; fi
 
