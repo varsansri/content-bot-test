@@ -1,9 +1,11 @@
-// Mi Media Content Lab website on Cloudflare: `npx wrangler deploy`
+// Mi Media Content Lab website + server on Cloudflare: `npx wrangler deploy`
 {
   "name": "mi-media-content-lab",
   "account_id": "b7b2ca865d39d0b6e0fc5363aebb81d4",
   "main": "cloudflare/worker.js",
   "compatibility_date": "2026-09-01",
   "assets": { "directory": "./docs", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  "d1_databases": [{ "binding": "DB", "database_name": "mi-media-lab", "database_id": "4afe1f57-7736-406e-a0f9-e349c67585d9" }],
+  "kv_namespaces": [{ "binding": "FILES", "id": "ceaf2883f4014931ae1d81fbffd06306" }],
   "workers_dev": true
 }

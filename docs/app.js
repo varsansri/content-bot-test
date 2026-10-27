@@ -1,6 +1,5 @@
-// Mi Media Content Lab website. Talks to the GitHub repo through /api/gh (the Cloudflare worker
-// adds the token): reads drafts from the "drafts" branch, starts the "bot" workflow for every
-// action, and edits brand.json / the logo on the main branch.
+// Mi Media Content Lab website. Everything is stored by the Cloudflare worker (/api/*);
+// the brain (Antigravity on the PC helper) picks up queued posts from there.
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -11,347 +10,131 @@ const store = {
   set(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode: keep in memory only */ }
   },
-  remove(key) {
-    try { localStorage.removeItem(key); } catch { /* ignore */ }
-  },
 };
 
-let repoInfo = null;
-let brand = null;
-let brandSha = null;
-let pending = store.get("pending", {}); // id -> { action, sha, at, error?, runUrl? }
-let hidden = store.get("hidden", []); // failed drafts the owner chose to hide
-const draftCache = {}; // draft.json blob sha -> draft
-const imgCache = {}; // post.jpg blob sha -> object URL
-let shown = []; // [{ draft, draftSha, imgSha }]
-let pollTimer = null;
-let editing = null;
+let state = null; // { projects, project, posts, assets, memory, queue, storage }
+let projectId = store.get("project", "");
+let tab = store.get("tab", "create");
 let filter = store.get("filter", "review");
 let count = 1;
 let aspect = store.get("aspect", "4:5");
-let logoChoice = store.get("logo", ""); // a file from brand.logos, "none", or "" for the default
-const logoUrls = {}; // file -> object URL
+let logoChoice = ""; // asset id, "none", or "" for the project default
+let editing = null;
+let pollTimer = null;
 
-// ---------- GitHub API ----------
+// ---------- server ----------
 
-async function gh(path, { method = "GET", body, accept, raw } = {}) {
-  const res = await fetch(`/api/gh${path}`, {
+async function api(path, { method = "GET", body, form } = {}) {
+  const res = await fetch(path, {
     method,
     cache: "no-store",
-    headers: {
-      Accept: accept || "application/vnd.github+json",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: form || (body ? JSON.stringify(body) : undefined),
   });
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    let msg = res.statusText;
-    try { msg = (await res.json()).message || msg; } catch { /* not JSON */ }
-    const err = new Error(res.status === 401 ? "Please log in again." : `GitHub said: ${msg} (${res.status})`);
+    const err = new Error(res.status === 401 ? "Please log in again." : data.message || `Something went wrong (${res.status}).`);
     err.status = res.status;
     throw err;
   }
-  if (raw) return res;
-  return res.status === 204 ? null : res.json();
-}
-
-const blob = (sha) => gh(`/git/blobs/${sha}`, { accept: "application/vnd.github.raw+json", raw: true });
-
-function bytesToB64(bytes) {
-  let s = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(s);
-}
-const textToB64 = (text) => bytesToB64(new TextEncoder().encode(text));
-const b64ToText = (b64) => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
-
-async function fileSha(path, ref) {
-  try { return (await gh(`/contents/${path}?ref=${ref}`)).sha; } catch (e) { if (e.status === 404) return null; throw e; }
-}
-
-async function putFile(path, b64, message, branch, sha) {
-  return gh(`/contents/${path}`, { method: "PUT", body: { message, content: b64, branch, ...(sha ? { sha } : {}) } });
-}
-
-async function ensureDraftsBranch() {
-  try {
-    await gh("/git/ref/heads/drafts");
-  } catch (e) {
-    if (e.status !== 404) throw e;
-    const tree = await gh("/git/trees", {
-      method: "POST",
-      body: { tree: [{ path: "README.md", mode: "100644", type: "blob", content: "Drafts made by the content bot.\n" }] },
-    });
-    const commit = await gh("/git/commits", { method: "POST", body: { message: "Start drafts", tree: tree.sha, parents: [] } });
-    await gh("/git/refs", { method: "POST", body: { ref: "refs/heads/drafts", sha: commit.sha } });
-  }
-}
-
-async function dispatch(action, id, extra = {}) {
-  const inputs = { action, id };
-  for (const [k, v] of Object.entries(extra)) if (v) inputs[k] = v;
-  await gh("/actions/workflows/bot.yml/dispatches", { method: "POST", body: { ref: repoInfo.default_branch, inputs } });
-  const current = shown.find((s) => s.draft.id === id);
-  pending[id] = { action, sha: current ? current.draftSha : null, at: Date.now(), aspect: extra.aspect };
-  store.set("pending", pending);
-  renderList();
-  poll(5000);
-}
-
-// ---------- drafts ----------
-
-const idTime = (id) => (id.match(/(\d{8}-\d{4,6})/) || ["", ""])[1].padEnd(15, "0");
-
-async function loadDrafts() {
-  let tree;
-  try {
-    tree = await gh("/git/trees/drafts?recursive=1");
-  } catch (e) {
-    if (e.status === 404 || e.status === 409) return [];
-    throw e;
-  }
-  const files = {};
-  for (const t of tree.tree) {
-    const m = t.path.match(/^drafts\/([^/]+)\/(draft\.json|post\.jpg)$/);
-    if (m) (files[m[1]] ||= {})[m[2]] = t.sha;
-  }
-  const ids = Object.keys(files).filter((id) => files[id]["draft.json"])
-    .sort((a, b) => idTime(b).localeCompare(idTime(a))).slice(0, 30);
-  await Promise.all(ids.map(async (id) => {
-    const sha = files[id]["draft.json"];
-    if (!draftCache[sha]) draftCache[sha] = JSON.parse(await (await blob(sha)).text());
-    const img = files[id]["post.jpg"];
-    if (img && !imgCache[img]) imgCache[img] = URL.createObjectURL(await (await blob(img)).blob());
-  }));
-  return ids.map((id) => ({ draft: draftCache[files[id]["draft.json"]], draftSha: files[id]["draft.json"], imgSha: files[id]["post.jpg"] }));
-}
-
-async function checkRuns() {
-  const old = Object.entries(pending).filter(([, p]) => !p.error && Date.now() - p.at > 25000);
-  if (!old.length) return;
-  const runs = (await gh("/actions/runs?event=workflow_dispatch&per_page=30")).workflow_runs;
-  for (const [id, p] of old) {
-    const run = runs.find((r) => r.display_title === `${p.action} ${id}`);
-    if (run && run.status === "completed") {
-      if (run.conclusion === "success") delete pending[id];
-      else { p.error = `The run ${run.conclusion}.`; p.runUrl = run.html_url; }
-    } else if (Date.now() - p.at > 10 * 60000) {
-      p.error = "This is taking too long.";
-      p.runUrl = `${repoInfo.html_url}/actions`;
-    }
-  }
+  return data;
 }
 
 async function refresh() {
   try {
-    shown = await loadDrafts();
-    for (const s of shown) {
-      const p = pending[s.draft.id];
-      if (p && p.sha !== s.draftSha) delete pending[s.draft.id];
-    }
-    await checkRuns();
-    store.set("pending", pending);
-    renderList();
+    state = await api(`/api/state?project=${encodeURIComponent(projectId)}`);
+    projectId = state.project;
+    store.set("project", projectId);
+    render();
   } catch (e) {
-    if (e.status === 401) return showLogin(e.message);
+    if (e.status === 401) return showLogin();
     toast(e.message);
   }
 }
 
-function poll(delay) {
+function poll() {
   clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    await refresh();
-    const busy = Object.values(pending).some((p) => !p.error) || shown.some((s) => s.draft.status === "queued");
-    poll(busy ? 6000 : 60000);
-  }, delay);
+  const busyNow = state && (state.queue > 0 || state.posts.some((p) => ["queued", "working"].includes(p.status)));
+  pollTimer = setTimeout(async () => { await refresh(); poll(); }, busyNow ? 6000 : 30000);
+}
+
+// ---------- helpers ----------
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const project = () => state && state.projects.find((p) => p.id === projectId);
+const brief = () => (project() && project().brief) || {};
+const logos = () => (state ? state.assets.filter((a) => a.kind === "logo") : []);
+const defaultLogo = () => brief().default_logo || (logos()[0] && logos()[0].id) || "none";
+
+function bytes(n) {
+  if (!n) return "0 KB";
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function ago(iso) {
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} days ago`;
+}
+
+const brainOnline = () => state && state.storage.pc && Date.now() - Date.parse(state.storage.pc.last_seen) < 5 * 60000;
+
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 4500);
+}
+
+async function busy(btn, fn) {
+  btn.disabled = true;
+  try { await fn(); } catch (e) { toast(e.message); } finally { btn.disabled = false; }
 }
 
 // ---------- rendering ----------
 
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const SECTIONS = ["login", "welcome", "create", "assets", "memory", "brief", "storage"];
 
-const STATUS = { draft: "Ready to review", posted: "Posted", skipped: "Skipped", failed: "Failed", working: "Working", queued: "Being made" };
+function showSection(name) {
+  for (const id of SECTIONS) $(`#${id}`).hidden = id !== name;
+}
+
+function render() {
+  $("#tabs").hidden = $("#project-bar").hidden = !state.projects.length;
+  if (!state.projects.length) return showSection("welcome");
+  $("#project-pick").innerHTML = state.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === projectId ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  document.querySelectorAll(".tab[data-tab]").forEach((t) => t.classList.toggle("on", t.dataset.tab === tab));
+  showSection(tab);
+  renderBrain();
+  renderCreate();
+  renderList();
+  if (tab === "assets") renderAssets();
+  if (tab === "memory") renderMemory();
+  if (tab === "brief" && $("#brief-form").dataset.project !== projectId) renderBrief();
+  if (tab === "storage") renderStorage();
+}
+
+function renderBrain() {
+  const waiting = state.queue;
+  $("#brain-line").innerHTML = brainOnline()
+    ? `<b class="ok">●</b> Brain online (your PC, Antigravity)${state.storage.pc.job ? " · making a post now" : ""}${waiting ? ` · ${waiting} waiting` : ""}`
+    : `<b class="bad">●</b> Brain offline${state.storage.pc ? ` (last seen ${ago(state.storage.pc.last_seen)})` : ""}. Posts wait until the PC helper runs.${waiting ? ` ${waiting} waiting.` : ""}`;
+}
+
 const RATIO = { "4:5": "4 / 5", "1:1": "1 / 1", "9:16": "9 / 16" };
 const SIZE_NAME = { "4:5": "Portrait", "1:1": "Square", "9:16": "Story" };
-const inReview = (d) => !["posted", "skipped"].includes(d.status);
-const ACTION_TEXT = { new: "Making the post…", post: "Posting to Instagram…", picture: "Making a new picture…", text: "Writing new text…", caption: "Saving the caption…", skip: "Skipping…" };
+const STATUS = { queued: "Waiting for the brain", working: "Being made", draft: "Ready to review", approved: "Approved", failed: "Failed" };
+const inFilter = (p) => filter === "all" || (filter === "approved" ? p.status === "approved" : p.status !== "approved");
 
-function fullCaption(d) {
-  return d.caption + (d.hashtags && d.hashtags.length ? "\n\n" + d.hashtags.join(" ") : "");
-}
-
-function when(d) {
-  const t = d.posted || d.updated || d.created;
-  return t ? new Date(t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
-}
-
-function renderList() {
-  const list = $("#list");
-  const all = shown.filter((s) => !hidden.includes(s.draft.id));
-  // Posts being made that have not reached GitHub yet.
-  for (const [id, p] of Object.entries(pending)) {
-    if (p.action === "new" && !all.some((s) => s.draft.id === id)) all.unshift({ draft: { id, status: "working", aspect: p.aspect }, ghost: true });
-  }
-  const counts = { review: all.filter((s) => inReview(s.draft)).length, posted: all.filter((s) => s.draft.status === "posted").length, all: all.length };
-  document.querySelectorAll("#filters button").forEach((b) => {
-    b.classList.toggle("on", b.dataset.filter === filter);
-    b.querySelector("span").textContent = counts[b.dataset.filter] ? `(${counts[b.dataset.filter]})` : "";
-  });
-  const items = all.filter((s) => filter === "all" || (filter === "posted" ? s.draft.status === "posted" : inReview(s.draft)));
-  $("#empty").hidden = items.length > 0;
-  $("#empty").textContent = filter === "review" ? "Nothing to review. Make some posts above." : "Nothing here yet.";
-  list.innerHTML = items.map(cardHtml).join("");
-}
-
-function cardHtml({ draft: d, imgSha, ghost }) {
-  const p = pending[d.id];
-  const queued = d.status === "queued" && !(p && !p.error);
-  const busy = (p && !p.error) || queued;
-  const status = queued ? "queued" : busy ? "working" : d.status;
-  const img = imgSha && imgCache[imgSha];
-  const busyText = queued
-    ? `${d.pc_started ? "Your PC is making it now…" : "Waiting for your PC…"}<br><span class="muted small">${d.pc_started ? "about 2 minutes" : "the PC helper must be running"}</span>`
-    : busy ? `${esc(ACTION_TEXT[p.action] || "Working…")}<br><span class="muted small">about a minute</span>` : "";
-  const ratio = RATIO[d.aspect] || RATIO["4:5"];
-  let html = `<article class="card" data-id="${esc(d.id)}">
-    <div class="pic" style="aspect-ratio: ${ratio}">${img ? `<img src="${img}" alt="${esc(d.headline)}">` : ""}
-      ${busyText ? `<div class="busy">${busyText}</div>` : ""}
-    </div><div class="body">
-    <span class="chip ${status}">${STATUS[status] || esc(status)}</span><span class="when">${esc(SIZE_NAME[d.aspect] || "Portrait")} · ${esc(when(d))}</span>`;
-  if (p && p.error) html += `<div class="err">${esc(p.error)} <a href="${esc(p.runUrl)}" target="_blank" rel="noopener">See what happened</a></div>`;
-  if (d.error) html += `<div class="err">${esc(d.error)}</div>`;
-  if (ghost) return html + `</div></article>`;
-
-  if (editing === d.id) {
-    html += `<textarea class="edit-box" rows="10">${esc(fullCaption(d))}</textarea>
-      <div class="actions"><button class="primary" data-act="save-caption">Save caption</button><button data-act="cancel-edit">Cancel</button></div>`;
-  } else if (d.caption) {
-    html += `<div class="caption">${esc(d.caption)}</div>`;
-    if (d.hashtags && d.hashtags.length) html += `<div class="tags">${esc(d.hashtags.join(" "))}</div>`;
-  }
-  if (d.status === "posted" && d.permalink) html += `<p><a href="${esc(d.permalink)}" target="_blank" rel="noopener">Open on Instagram</a></p>`;
-  if (img && d.caption && !busy && editing !== d.id && d.status !== "failed") {
-    html += `<div class="actions">
-      <a class="btn" href="${img}" download="${esc(d.id)}.jpg">⬇ Download picture</a>
-      <button data-act="copy">📋 Copy caption</button>
-    </div>`;
-  }
-  if (d.status === "draft" && !busy && editing !== d.id) {
-    html += `<div class="actions">
-      <button class="primary" data-act="post">Post to Instagram</button>
-      ${d.own_photo ? "" : `<button data-act="picture">🖼 New picture</button>`}
-      <button data-act="text">✍️ New words</button>
-      <button data-act="edit">✏️ Edit caption</button>
-      <button class="danger" data-act="skip">🗑 Remove</button>
-    </div>`;
-  }
-  if (d.status === "failed" && !busy) html += `<div class="actions"><button data-act="retry">Try again</button><button data-act="dismiss">Hide</button></div>`;
-  if (p && p.error) html += `<div class="actions"><button data-act="dismiss">OK</button></div>`;
-  return html + `</div></article>`;
-}
-
-async function onCardClick(e) {
-  const btn = e.target.closest("button[data-act]");
-  if (!btn) return;
-  const id = btn.closest(".card").dataset.id;
-  const act = btn.dataset.act;
-  const item = shown.find((s) => s.draft.id === id);
-  btn.disabled = true;
-  try {
-    if (act === "edit") { editing = id; renderList(); return; }
-    if (act === "copy") {
-      await navigator.clipboard.writeText(fullCaption(item.draft));
-      toast("Caption copied.");
-      btn.disabled = false;
-      return;
-    }
-    if (act === "cancel-edit") { editing = null; renderList(); return; }
-    if (act === "dismiss") {
-      if (pending[id]) delete pending[id];
-      else hidden = [...hidden, id].slice(-200);
-      store.set("pending", pending);
-      store.set("hidden", hidden);
-      renderList();
-      return;
-    }
-    if (act === "save-caption") {
-      const text = btn.closest(".card").querySelector(".edit-box").value.trim();
-      if (text.length > 2200) { toast("Instagram allows 2,200 characters at most."); btn.disabled = false; return; }
-      editing = null;
-      await dispatch("caption", id, { caption: text });
-      return;
-    }
-    if (act === "post" && !confirmPost()) { btn.disabled = false; return; }
-    if (act === "retry") { await makePost(item ? item.draft.topic : "", null, item && item.draft.aspect); return; }
-    await dispatch(act, id);
-  } catch (err) {
-    toast(err.message);
-    btn.disabled = false;
-  }
-}
-
-function confirmPost() {
-  // A second tap within 4 seconds confirms, so nothing goes live by accident.
-  const now = Date.now();
-  if (confirmPost.armed && now - confirmPost.armed < 4000) { confirmPost.armed = 0; return true; }
-  confirmPost.armed = now;
-  toast("Tap Post again to confirm.");
-  return false;
-}
-
-// ---------- making posts ----------
-
-function newId() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `p-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-async function photoToJpegB64(file) {
-  const bmp = await createImageBitmap(file);
-  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement("canvas");
-  c.width = Math.round(bmp.width * scale);
-  c.height = Math.round(bmp.height * scale);
-  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
-  const out = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
-  return bytesToB64(new Uint8Array(await out.arrayBuffer()));
-}
-
-async function makePost(topic, photoFile, size = aspect) {
-  const id = newId();
-  let photo = "";
-  if (photoFile) {
-    toast("Uploading your photo…");
-    photo = `uploads/${id}.jpg`;
-    await putFile(photo, await photoToJpegB64(photoFile), `photo for ${id}`, "drafts");
-  }
-  await dispatch("new", id, { topic, photo, aspect: size || "4:5", logo: currentLogo() });
-}
-
-async function onNewPost() {
-  const btn = $("#new-go");
-  btn.disabled = true;
-  const photo = $("#new-photo").files[0];
-  const n = photo ? 1 : count;
-  try {
-    for (let i = 0; i < n; i++) {
-      btn.textContent = n > 1 ? `Starting ${i + 1} of ${n}…` : "Starting…";
-      await makePost($("#new-topic").value.trim(), photo);
-    }
-    toast(n > 1 ? `Started ${n} posts. They appear below as they are made.` : "Started. The post appears below when it is made.");
-    $("#new-topic").value = "";
-    $("#new-photo").value = "";
-    filter = "review";
-    store.set("filter", filter);
-    renderList();
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    btn.disabled = false;
-    renderCreate();
-  }
+function currentLogo() {
+  if (logoChoice === "none") return "none";
+  return logos().some((l) => l.id === logoChoice) ? logoChoice : defaultLogo();
 }
 
 function renderCreate() {
@@ -362,135 +145,112 @@ function renderCreate() {
   $("#count-plus").disabled = !!photo || count >= 10;
   document.querySelectorAll("#sizes .size").forEach((b) => b.classList.toggle("on", b.dataset.aspect === aspect));
   $("#new-go").textContent = `Make ${n} ${SIZE_NAME[aspect].toLowerCase()} post${n > 1 ? "s" : ""}`;
-  renderLogoPick();
-}
-
-// ---------- logos ----------
-
-const logos = () => (brand && brand.logos) || [];
-const defaultLogo = () => (brand && brand.logo && brand.logo.file) || "";
-
-function currentLogo() {
-  if (logoChoice === "none") return "none";
-  return logos().some((l) => l.file === logoChoice) ? logoChoice : defaultLogo();
-}
-
-function logoImg(file) {
-  if (!logoUrls[file]) {
-    logoUrls[file] = gh(`/contents/${file}?ref=${repoInfo.default_branch}`, { accept: "application/vnd.github.raw+json", raw: true })
-      .then((r) => r.blob()).then((b) => URL.createObjectURL(b)).catch(() => "");
-  }
-  return logoUrls[file];
-}
-
-// Fills <img data-logo="file"> tags once their pictures arrive.
-function fillLogoImgs(root) {
-  root.querySelectorAll("img[data-logo]").forEach(async (img) => { img.src = await logoImg(img.dataset.logo); });
-}
-
-function renderLogoPick() {
-  const box = $("#logo-pick");
-  if (!box || !brand) return;
+  if (!state) return;
   const cur = currentLogo();
-  box.innerHTML = logos().map((l) => `<button type="button" class="logo-tile ${l.file === cur ? "on" : ""}" data-file="${esc(l.file)}">
-      <span class="logo-pic"><img data-logo="${esc(l.file)}" alt=""></span><small>${esc(l.name)}</small></button>`).join("") +
-    `<button type="button" class="logo-tile ${cur === "none" ? "on" : ""}" data-file="none"><span class="logo-pic none">–</span><small>No logo</small></button>`;
-  fillLogoImgs(box);
+  $("#logo-pick").innerHTML = logos().map((l) => `<button type="button" class="logo-tile ${l.id === cur ? "on" : ""}" data-logo="${esc(l.id)}">
+      <span class="logo-pic"><img src="${esc(l.url)}" alt=""></span><small>${esc(l.name)}</small></button>`).join("") +
+    `<button type="button" class="logo-tile ${cur === "none" ? "on" : ""}" data-logo="none"><span class="logo-pic none">–</span><small>No logo</small></button>` +
+    (logos().length ? "" : `<p class="muted small">Add logos in the Assets tab.</p>`);
 }
 
-function renderLogoList() {
-  const def = defaultLogo();
-  $("#logo-list").innerHTML = logos().map((l, i) => `<div class="logo-item" data-i="${i}">
-      <span class="logo-pic"><img data-logo="${esc(l.file)}" alt=""></span>
-      <div class="logo-fields">
-        <b>${esc(l.name)}</b> ${l.file === def ? `<span class="chip posted">Default</span>` : ""}
-        <label>Handle on the picture <input data-k="handle" value="${esc(l.handle || "")}" placeholder="${esc(brand.instagram_handle || "@yourbrand")}"></label>
-        <label>Width in pixels <input data-k="width" type="number" min="40" max="900" value="${esc(l.width || 180)}"></label>
-        <div class="row">
-          ${l.file === def ? "" : `<button type="button" data-logo-act="default">Make default</button>`}
-          <button type="button" class="danger" data-logo-act="remove">Remove</button>
-        </div>
-      </div></div>`).join("") || `<p class="muted">No logos yet. Add one below.</p>`;
-  fillLogoImgs($("#logo-list"));
-}
-
-function readLogoFields() {
-  document.querySelectorAll("#logo-list .logo-item").forEach((row) => {
-    const l = brand.logos[row.dataset.i];
-    l.handle = row.querySelector('[data-k="handle"]').value.trim();
-    l.width = Number(row.querySelector('[data-k="width"]').value) || 180;
+function renderList() {
+  const posts = state.posts;
+  const counts = { review: posts.filter((p) => p.status !== "approved").length, approved: posts.filter((p) => p.status === "approved").length, all: posts.length };
+  document.querySelectorAll("#filters button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.filter === filter);
+    b.querySelector("span").textContent = counts[b.dataset.filter] ? `(${counts[b.dataset.filter]})` : "";
   });
+  const items = posts.filter(inFilter);
+  $("#empty").hidden = items.length > 0;
+  $("#empty").textContent = filter === "review" ? "Nothing to review. Make some posts above." : "Nothing here yet.";
+  $("#list").innerHTML = items.map(cardHtml).join("");
 }
 
-async function onLogoListClick(e) {
-  const btn = e.target.closest("button[data-logo-act]");
-  if (!btn) return;
-  const i = Number(btn.closest(".logo-item").dataset.i);
-  btn.disabled = true;
-  try {
-    readLogoFields();
-    const picked = brand.logos[i];
-    await loadBrand(); // start from the latest version
-    brand.logos = brand.logos || [];
-    const j = brand.logos.findIndex((l) => l.file === picked.file);
-    if (j < 0) throw new Error("That logo was already removed.");
-    if (btn.dataset.logoAct === "default") {
-      brand.logo = { ...(brand.logo || {}), file: picked.file, width: picked.width };
-      await saveBrand(`Default logo: ${picked.name}`);
-      toast(`${picked.name} is now the default logo.`);
-    } else {
-      if (brand.logos.length === 1) throw new Error("Keep at least one logo. Add another one first.");
-      brand.logos.splice(j, 1);
-      if (brand.logo && brand.logo.file === picked.file) brand.logo = { ...brand.logo, file: brand.logos[0].file, width: brand.logos[0].width };
-      await saveBrand(`Remove logo: ${picked.name}`);
-      toast(`${picked.name} removed.`);
-    }
-    renderLogoList();
-    renderLogoPick();
-  } catch (err) {
-    toast(err.message);
-    btn.disabled = false;
+function fullCaption(p) {
+  return p.caption + (p.hashtags && p.hashtags.length ? "\n\n" + p.hashtags.join(" ") : "");
+}
+
+function cardHtml(p) {
+  const making = p.status === "queued" || p.status === "working";
+  const img = p.post_key ? `/api/file/${p.post_key}` : "";
+  const overlay = making
+    ? `<div class="busy">${p.status === "working" ? "The brain is making this…" : brainOnline() ? "Waiting in line…" : "Waiting for the brain…"}<br>
+       <span class="muted small">${p.status === "working" ? "about 3 minutes" : brainOnline() ? "it makes posts one by one" : "start the PC helper"}</span></div>` : "";
+  let html = `<article class="card" data-id="${esc(p.id)}">
+    <div class="pic" style="aspect-ratio: ${RATIO[p.aspect] || RATIO["4:5"]}">${img ? `<img src="${img}" alt="${esc(p.headline)}" loading="lazy">` : ""}${overlay}</div>
+    <div class="body">
+    <span class="chip ${p.status}">${STATUS[p.status] || esc(p.status)}</span><span class="when">${SIZE_NAME[p.aspect] || "Portrait"} · ${esc(new Date(p.updated).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}</span>`;
+  if (p.error) html += `<div class="err">${esc(p.error)}</div>`;
+  if (p.topic && !p.caption) html += `<p class="muted small">Topic: ${esc(p.topic)}</p>`;
+  if (editing === p.id) {
+    return html + `<textarea class="edit-box" rows="10">${esc(fullCaption(p))}</textarea>
+      <div class="actions"><button class="primary" data-act="save-caption">Save caption</button><button data-act="cancel-edit">Cancel</button></div></div></article>`;
   }
-}
-
-async function onLogoAdd() {
-  const btn = $("#logo-add");
-  const name = $("#logo-name").value.trim();
-  const file = $("#logo-file").files[0];
-  if (!name || !file) { toast("Give the logo a name and pick a PNG file."); return; }
-  btn.disabled = true;
-  try {
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "logo";
-    const path = `assets/logos/${slug}-${Date.now().toString(36)}.png`;
-    await putFile(path, bytesToB64(new Uint8Array(await file.arrayBuffer())), `Add logo: ${name}`, repoInfo.default_branch);
-    await loadBrand();
-    brand.logos = [...(brand.logos || []), { name, file: path, width: 180, handle: $("#logo-handle").value.trim() }];
-    await saveBrand(`Add logo: ${name}`);
-    logoUrls[path] = Promise.resolve(URL.createObjectURL(file));
-    $("#logo-name").value = "";
-    $("#logo-handle").value = "";
-    $("#logo-file").value = "";
-    renderLogoList();
-    renderLogoPick();
-    toast(`${name} added. Pick it when you make posts.`);
-  } catch (err) {
-    toast(err.message);
-  } finally {
-    btn.disabled = false;
+  if (p.caption) {
+    html += `<div class="caption">${esc(p.caption)}</div>`;
+    if (p.hashtags.length) html += `<div class="tags">${esc(p.hashtags.join(" "))}</div>`;
   }
+  if (img && p.caption && !making) {
+    html += `<div class="actions"><a class="btn" href="${img}" download="${esc(p.id)}.jpg">⬇ Download picture</a><button data-act="copy">📋 Copy caption</button></div>`;
+  }
+  if (p.status === "draft") {
+    html += `<div class="actions">
+      <button class="primary" data-act="approve">✓ Approve</button>
+      ${p.photo_id ? "" : `<button data-act="picture">🖼 New picture</button>`}
+      <button data-act="text">✍️ New words</button>
+      <button data-act="edit">✏️ Edit caption</button>
+      <button class="danger" data-act="remove">🗑 Remove</button></div>`;
+  } else if (p.status === "approved") {
+    html += `<div class="actions"><button data-act="text">✍️ New words</button><button class="danger" data-act="remove">🗑 Remove</button></div>`;
+  } else if (p.status === "failed") {
+    html += `<div class="actions"><button data-act="retry">Try again</button><button class="danger" data-act="remove">🗑 Remove</button></div>`;
+  }
+  return html + `</div></article>`;
 }
 
-// ---------- brand ----------
+function renderAssets() {
+  $("#asset-handle-row").hidden = $("#asset-kind").value !== "logo";
+  const groups = [["logo", "Logos"], ["reference", "References"], ["photo", "Photos"]];
+  const def = defaultLogo();
+  $("#asset-list").innerHTML = groups.map(([kind, title]) => {
+    const list = state.assets.filter((a) => a.kind === kind);
+    if (!list.length) return "";
+    return `<div class="panel"><h2>${title}</h2><div class="asset-grid">${list.map((a) => `<div class="asset" data-id="${esc(a.id)}">
+      <span class="asset-pic ${kind === "logo" ? "dark" : ""}"><img src="${esc(a.url)}" alt="" loading="lazy"></span>
+      <div class="asset-fields">
+        <b>${esc(a.name)}</b> ${kind === "logo" && a.id === def ? `<span class="chip approved">Default</span>` : ""}
+        <span class="muted small">${bytes(a.bytes)}</span>
+        <label>How to use it <input data-k="note" value="${esc(a.note)}"></label>
+        ${kind === "logo" ? `<div class="grid2 tight">
+          <label>Handle on the picture <input data-k="handle" value="${esc(a.settings.handle || "")}" placeholder="${esc(brief().instagram_handle || "@yourbrand")}"></label>
+          <label>Width (px) <input data-k="width" type="number" min="40" max="900" value="${esc(a.settings.width || 180)}"></label></div>` : ""}
+        <div class="row">
+          <button data-asset-act="save">Save</button>
+          ${kind === "logo" && a.id !== def ? `<button data-asset-act="default">Make default</button>` : ""}
+          <button class="danger" data-asset-act="delete">Delete</button>
+        </div>
+      </div></div>`).join("")}</div></div>`;
+  }).join("") || `<p class="muted center">No assets yet. Add the project's logo above.</p>`;
+}
+
+function renderMemory() {
+  const SRC = { you: "You", brain: "Brain", feedback: "Your feedback" };
+  $("#memory-list").innerHTML = state.memory.map((m) => `<div class="memory" data-id="${esc(m.id)}">
+      <span class="chip ${esc(m.source)}">${SRC[m.source] || esc(m.source)}</span>
+      <span class="memory-note">${esc(m.note)}</span>
+      <button class="ghost danger small-btn" data-mem-act="delete" aria-label="Delete">✕</button></div>`).join("") ||
+    `<p class="muted center">Nothing remembered yet. It fills up as you approve, reject and edit posts.</p>`;
+}
 
 const FIELDS = [
   "About the brand",
   ["brand_name", "Brand name", "text"],
-  ["instagram_handle", "Instagram handle (shown on every picture)", "text"],
-  ["about", "What the account is about", "area"],
+  ["instagram_handle", "Instagram handle (shown on every picture unless the logo has its own)", "text"],
+  ["about", "What the account is about and who follows it", "area"],
   "Captions",
   ["voice", "How the captions should sound", "area"],
   ["language", "Language", "text"],
-  ["topics", "Topics for scheduled posts (one per line)", "lines"],
+  ["topics", "Topics the brain can pick from (one per line)", "lines"],
   ["example_captions", "Example captions you like (blank line between them)", "blocks"],
   ["always_hashtags", "Hashtags on every post", "tags"],
   ["hashtag_count", "How many extra hashtags", "number"],
@@ -501,10 +261,7 @@ const FIELDS = [
   ["colors.accent", "Accent bar colour", "color"],
   ["colors.overlay", "Shade colour behind text", "color"],
   ["overlay_strength", "Shade strength (0 to 1)", "decimal"],
-  ["logo.position", "Logo position", "select:top-left,top-right,bottom-left,bottom-right"],
-  "Daily schedule",
-  ["post_times", "Daily posting times, 24-hour (e.g. 10:00, 19:00)", "csv"],
-  ["timezone", "Timezone (e.g. Asia/Kolkata)", "text"],
+  ["logo_position", "Logo position", "select:top-left,top-right,bottom-left,bottom-right"],
 ];
 
 const getPath = (obj, path) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj);
@@ -517,172 +274,253 @@ function setPath(obj, path, value) {
 function fieldHtml(field, i) {
   if (typeof field === "string") return `<h3>${esc(field)}</h3>`;
   const [key, label, type] = field;
-  const v = getPath(brand, key);
+  const v = getPath(brief(), key);
   const name = `f${i}`;
   if (type === "area") return `<label>${label}<textarea name="${name}" rows="3">${esc(v)}</textarea></label>`;
   if (type === "lines") return `<label>${label}<textarea name="${name}" rows="5">${esc((v || []).join("\n"))}</textarea></label>`;
   if (type === "blocks") return `<label>${label}<textarea name="${name}" rows="8">${esc((v || []).join("\n\n"))}</textarea></label>`;
   if (type === "tags") return `<label>${label}<input name="${name}" value="${esc((v || []).join(" "))}"></label>`;
-  if (type === "csv") return `<label>${label}<input name="${name}" value="${esc((v || []).join(", "))}"></label>`;
   if (type === "bool") return `<label class="check"><input type="checkbox" name="${name}" ${v ? "checked" : ""}>${label}</label>`;
   if (type === "color") return `<label>${label}<input type="color" name="${name}" value="${esc(v || "#ffffff")}"></label>`;
-  if (type === "number") return `<label>${label}<input type="number" name="${name}" value="${esc(v)}" min="0"></label>`;
-  if (type === "decimal") return `<label>${label}<input type="number" name="${name}" value="${esc(v)}" min="0" max="1" step="0.05"></label>`;
+  if (type === "number") return `<label>${label}<input type="number" name="${name}" value="${esc(v ?? 8)}" min="0" max="30"></label>`;
+  if (type === "decimal") return `<label>${label}<input type="number" name="${name}" value="${esc(v ?? 0.8)}" min="0" max="1" step="0.05"></label>`;
   if (type.startsWith("select:")) {
-    const opts = type.slice(7).split(",").map((o) => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("");
+    const opts = type.slice(7).split(",").map((o) => `<option ${o === (v || "top-left") ? "selected" : ""}>${o}</option>`).join("");
     return `<label>${label}<select name="${name}">${opts}</select></label>`;
   }
   return `<label>${label}<input name="${name}" value="${esc(v)}"></label>`;
 }
 
 function readField(field, i) {
-  if (typeof field === "string") return undefined;
   const type = field[2];
-  const el = $(`#brand-form [name="f${i}"]`);
+  const el = $(`#brief-form [name="f${i}"]`);
   const raw = type === "bool" ? el.checked : el.value;
   if (type === "lines") return raw.split("\n").map((s) => s.trim()).filter(Boolean);
   if (type === "blocks") return raw.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
   if (type === "tags") return raw.split(/[\s,]+/).filter(Boolean).map((t) => (t.startsWith("#") ? t : "#" + t));
-  if (type === "csv") {
-    const times = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    const bad = times.find((t) => !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t));
-    if (bad) throw new Error(`"${bad}" is not a time like 19:00`);
-    return times;
-  }
   if (type === "number" || type === "decimal") return Number(raw);
   return raw;
 }
 
-async function loadBrand() {
-  const file = await gh(`/contents/brand.json?ref=${repoInfo.default_branch}`);
-  brand = JSON.parse(b64ToText(file.content));
-  brandSha = file.sha;
-  renderSchedule();
-  renderLogoPick();
+function renderBrief() {
+  if (!project()) return;
+  $("#brief-form").innerHTML = `<label>Project name<input name="project-name" value="${esc(project().name)}"></label>` + FIELDS.map(fieldHtml).join("");
+  $("#brief-form").dataset.project = projectId;
 }
 
-async function saveBrand(message) {
-  const res = await putFile("brand.json", textToB64(JSON.stringify(brand, null, 2) + "\n"), message, repoInfo.default_branch, brandSha);
-  brandSha = res.content.sha;
-  renderSchedule();
+function renderStorage() {
+  const { cloud, pc } = state.storage;
+  const pct = Math.min(100, (cloud.total / cloud.limit) * 100);
+  $("#cloud-bar").style.width = `${Math.max(pct, 0.5)}%`;
+  $("#cloud-bar").className = pct > 85 ? "bad" : pct > 60 ? "warn" : "";
+  $("#cloud-text").textContent = `${bytes(cloud.total)} used of ${bytes(cloud.limit)} free (${pct.toFixed(1)}%)`;
+  const names = Object.fromEntries(state.projects.map((p) => [p.id, p.name]));
+  const byProject = {};
+  for (const r of cloud.rows) (byProject[r.project_id] ||= { assets: [0, 0], posts: [0, 0] })[r.kind] = [r.n, r.bytes];
+  $("#cloud-rows").innerHTML = `<table class="tbl"><tr><th>Project</th><th>Assets</th><th>Posts</th><th>Total</th></tr>` +
+    (Object.entries(byProject).map(([id, v]) => `<tr><td>${esc(names[id] || "(deleted)")}</td><td>${v.assets[0]} · ${bytes(v.assets[1])}</td>
+      <td>${v.posts[0]} · ${bytes(v.posts[1])}</td><td>${bytes(v.assets[1] + v.posts[1])}</td></tr>`).join("") ||
+      `<tr><td colspan="4" class="muted">Nothing stored yet.</td></tr>`) + `</table>`;
+  $("#pc-rows").innerHTML = pc ? `<table class="tbl">
+      <tr><td>Status</td><td>${brainOnline() ? `<b class="ok">●</b> Online` : `<b class="bad">●</b> Offline`} · last seen ${ago(pc.last_seen)}</td></tr>
+      <tr><td>Helper's job files</td><td>${bytes(pc.helper_bytes)}</td></tr>
+      <tr><td>Antigravity's folder</td><td>${bytes(pc.antigravity_bytes)}</td></tr>
+      <tr><td>Free space on the PC</td><td>${bytes(pc.disk_free)} of ${bytes(pc.disk_total)}</td></tr></table>`
+    : `<p class="muted">The PC helper has not connected yet.</p>`;
 }
 
-function renderBrand() {
-  $("#brand-form").innerHTML = FIELDS.map(fieldHtml).join("");
-  renderLogoList();
+// ---------- actions ----------
+
+async function onNewPost() {
+  const btn = $("#new-go");
+  await busy(btn, async () => {
+    const photo = $("#new-photo").files[0];
+    let photoId = "";
+    if (photo) {
+      btn.textContent = "Uploading your photo…";
+      const form = new FormData();
+      form.append("file", await shrinkPhoto(photo), "photo.jpg");
+      form.append("project_id", projectId);
+      form.append("kind", "photo");
+      form.append("name", photo.name);
+      photoId = (await api("/api/assets", { method: "POST", form })).id;
+    }
+    const n = photo ? 1 : count;
+    await api("/api/posts", { method: "POST", body: { project_id: projectId, topic: $("#new-topic").value.trim(), count: n, aspect, logo_id: currentLogo(), photo_id: photoId } });
+    toast(n > 1 ? `${n} posts are in line. They appear below as the brain makes them.` : "Your post is in line. It appears below when it is made.");
+    $("#new-topic").value = "";
+    $("#new-photo").value = "";
+    filter = "review";
+    store.set("filter", filter);
+    await refresh();
+    poll();
+  });
+  renderCreate();
 }
 
-async function onBrandSave() {
-  const btn = $("#brand-save");
-  btn.disabled = true;
-  try {
-    const values = FIELDS.map(readField);
-    readLogoFields();
-    const logoEdits = Object.fromEntries(logos().map((l) => [l.file, { handle: l.handle, width: l.width }]));
-    await loadBrand(); // start from the latest version
-    FIELDS.forEach((field, i) => { if (typeof field !== "string") setPath(brand, field[0], values[i]); });
-    for (const l of logos()) Object.assign(l, logoEdits[l.file] || {});
-    const def = logos().find((l) => l.file === defaultLogo());
-    if (def) brand.logo.width = def.width;
-    await saveBrand("Update brand settings");
-    toast("Saved. New posts use the new look.");
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    btn.disabled = false;
+async function shrinkPhoto(file) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * scale);
+  c.height = Math.round(bmp.height * scale);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
+}
+
+// A second tap within 4 seconds confirms, so nothing is deleted by accident.
+function confirmTwice(btn, message) {
+  const t = Date.now();
+  if (btn.dataset.armed && t - Number(btn.dataset.armed) < 4000) return true;
+  btn.dataset.armed = t;
+  toast(message);
+  return false;
+}
+
+async function onCardClick(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.closest(".card").dataset.id;
+  const act = btn.dataset.act;
+  const post = state.posts.find((p) => p.id === id);
+  if (act === "edit") { editing = id; return renderList(); }
+  if (act === "cancel-edit") { editing = null; return renderList(); }
+  if (act === "copy") {
+    await navigator.clipboard.writeText(fullCaption(post)).then(() => toast("Caption copied."), () => toast("Could not copy."));
+    return;
   }
+  if (act === "remove" && !confirmTwice(btn, "Tap Remove again to delete this post.")) return;
+  await busy(btn, async () => {
+    if (act === "save-caption") {
+      const text = btn.closest(".card").querySelector(".edit-box").value.trim();
+      if (text.length > 2200) throw new Error("Instagram allows 2,200 characters at most.");
+      await api(`/api/posts/${id}/caption`, { method: "POST", body: { caption: text } });
+      editing = null;
+    } else {
+      await api(`/api/posts/${id}/${act}`, { method: "POST", body: {} });
+      if (act === "approve") toast("Approved. Download it for now; auto-posting comes with Zernio.");
+    }
+    await refresh();
+    poll();
+  });
 }
 
-function renderSchedule() {
-  const times = (brand.post_times || []).join(", ");
-  $("#schedule-text").textContent = times ? `A new post every day at ${times} (${brand.timezone || "UTC"})` : "No daily posts";
-  $("#auto-toggle").checked = !!brand.auto_post;
+async function onAssetAdd() {
+  const file = $("#asset-file").files[0];
+  if (!file) return toast("Pick a file first.");
+  await busy($("#asset-add"), async () => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("project_id", projectId);
+    form.append("kind", $("#asset-kind").value);
+    form.append("name", $("#asset-name").value.trim() || file.name);
+    form.append("note", $("#asset-note").value.trim());
+    form.append("handle", $("#asset-handle").value.trim());
+    await api("/api/assets", { method: "POST", form });
+    for (const id of ["#asset-file", "#asset-name", "#asset-note", "#asset-handle"]) $(id).value = "";
+    toast("Asset saved.");
+    await refresh();
+  });
 }
 
-async function onAutoToggle(e) {
-  const on = e.target.checked;
-  e.target.disabled = true;
-  try {
-    await loadBrand();
-    brand.auto_post = on;
-    await saveBrand(on ? "Turn auto-post on" : "Turn auto-post off");
-    toast(on ? "Auto-post ON: scheduled posts go live without asking." : "Auto-post OFF: scheduled posts wait for you.");
-  } catch (err) {
-    e.target.checked = !on;
-    toast(err.message);
-  } finally {
-    e.target.disabled = false;
-  }
+async function onAssetClick(e) {
+  const btn = e.target.closest("button[data-asset-act]");
+  if (!btn) return;
+  const row = btn.closest(".asset");
+  const id = row.dataset.id;
+  const act = btn.dataset.assetAct;
+  if (act === "delete" && !confirmTwice(btn, "Tap Delete again to remove this asset.")) return;
+  await busy(btn, async () => {
+    if (act === "delete") {
+      await api(`/api/assets/${id}`, { method: "DELETE" });
+    } else if (act === "default") {
+      await api(`/api/projects/${projectId}`, { method: "PUT", body: { brief: { default_logo: id } } });
+      toast("Default logo changed.");
+    } else {
+      const settings = {};
+      const handle = row.querySelector('[data-k="handle"]');
+      const width = row.querySelector('[data-k="width"]');
+      if (handle) settings.handle = handle.value.trim();
+      if (width) settings.width = Number(width.value) || 180;
+      await api(`/api/assets/${id}`, { method: "PUT", body: { note: row.querySelector('[data-k="note"]').value.trim(), settings } });
+      toast("Saved.");
+    }
+    await refresh();
+  });
+}
+
+async function onBriefSave() {
+  await busy($("#brief-save"), async () => {
+    const out = {};
+    FIELDS.forEach((field, i) => { if (typeof field !== "string") setPath(out, field[0], readField(field, i)); });
+    out.colors = { ...(brief().colors || {}), ...out.colors };
+    await api(`/api/projects/${projectId}`, { method: "PUT", body: { name: $('#brief-form [name="project-name"]').value.trim(), brief: out } });
+    toast("Brief saved. New posts follow it.");
+    await refresh();
+    renderBrief();
+  });
+}
+
+async function newProject(name) {
+  if (!name) return toast("Give the project a name.");
+  const { id } = await api("/api/projects", { method: "POST", body: { name, copy_from: projectId } });
+  projectId = id;
+  store.set("project", id);
+  tab = "brief";
+  store.set("tab", tab);
+  await refresh();
+  renderBrief();
+  toast(`${name} created. Fill in its brief and add its logo in Assets.`);
 }
 
 // ---------- log in + navigation ----------
 
-function showTab(name) {
-  for (const id of ["posts", "brand", "setup"]) $(`#${id}`).hidden = id !== name;
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === name));
-  if (name === "brand" && brand) renderBrand();
-}
-
-async function connect() {
-  $("#cfg-status").textContent = "Loading…";
-  repoInfo = await gh("");
-  if (!repoInfo.permissions || !repoInfo.permissions.push) throw new Error("The bot's GitHub key cannot change the repository.");
-  await ensureDraftsBranch();
-  await loadBrand();
-  $("#tabs").hidden = false;
-  $("#cfg-status").textContent = "";
-  showTab("posts");
-  await refresh();
-  poll(Object.values(pending).some((p) => !p.error) ? 6000 : 60000);
-}
-
 function showLogin(message = "") {
   clearTimeout(pollTimer);
-  repoInfo = null;
-  $("#tabs").hidden = true;
-  showTab("setup");
-  $("#cfg-status").textContent = message;
+  $("#tabs").hidden = $("#project-bar").hidden = true;
+  showSection("login");
+  $("#login-status").textContent = message;
 }
 
 async function onLogin(e) {
   e.preventDefault();
-  const btn = $("#login-go");
-  btn.disabled = true;
-  $("#cfg-status").textContent = "Checking…";
-  try {
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: $("#login-pass").value }),
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "Could not log in.");
+  await busy($("#login-go"), async () => {
+    $("#login-status").textContent = "Checking…";
+    try {
+      await api("/api/login", { method: "POST", body: { password: $("#login-pass").value } });
+    } catch (err) {
+      $("#login-status").textContent = err.status === 401 ? "Wrong password." : err.message;
+      return;
+    }
     $("#login-pass").value = "";
-    await connect();
-  } catch (err) {
-    $("#cfg-status").textContent = err.message;
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function onLogout() {
-  await fetch("/api/logout", { method: "POST" }).catch(() => {});
-  store.remove("pending");
-  location.reload();
-}
-
-let toastTimer;
-function toast(msg) {
-  const t = $("#toast");
-  t.textContent = msg;
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 4500);
+    $("#login-status").textContent = "";
+    await refresh();
+    poll();
+  });
 }
 
 function init() {
-  $("#setup").addEventListener("submit", onLogin);
-  $("#logout").addEventListener("click", onLogout);
+  $("#login").addEventListener("submit", onLogin);
+  $("#logout").addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }).catch(() => {}); location.reload(); });
+  document.querySelectorAll(".tab[data-tab]").forEach((t) => t.addEventListener("click", () => {
+    tab = t.dataset.tab;
+    store.set("tab", tab);
+    if (tab === "brief") renderBrief();
+    render();
+  }));
+  $("#project-pick").addEventListener("change", async (e) => {
+    projectId = e.target.value;
+    logoChoice = "";
+    editing = null;
+    await refresh();
+    renderBrief();
+  });
+  $("#project-new").addEventListener("click", () => {
+    const name = prompt("Name of the new project (for example Mi Media):");
+    if (name) newProject(name.trim()).catch((err) => toast(err.message));
+  });
+  $("#first-go").addEventListener("click", () => newProject($("#first-name").value.trim()).catch((err) => toast(err.message)));
+
   $("#new-go").addEventListener("click", onNewPost);
   $("#count-minus").addEventListener("click", () => { count = Math.max(1, count - 1); renderCreate(); });
   $("#count-plus").addEventListener("click", () => { count = Math.min(10, count + 1); renderCreate(); });
@@ -694,6 +532,12 @@ function init() {
     store.set("aspect", aspect);
     renderCreate();
   });
+  $("#logo-pick").addEventListener("click", (e) => {
+    const b = e.target.closest(".logo-tile");
+    if (!b) return;
+    logoChoice = b.dataset.logo;
+    renderCreate();
+  });
   $("#filters").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-filter]");
     if (!b) return;
@@ -701,24 +545,38 @@ function init() {
     store.set("filter", filter);
     renderList();
   });
-  renderCreate();
   $("#list").addEventListener("click", onCardClick);
-  $("#brand-save").addEventListener("click", onBrandSave);
-  $("#logo-add").addEventListener("click", onLogoAdd);
-  $("#logo-list").addEventListener("click", onLogoListClick);
-  $("#logo-pick").addEventListener("click", (e) => {
-    const b = e.target.closest(".logo-tile");
-    if (!b) return;
-    logoChoice = b.dataset.file;
-    store.set("logo", logoChoice);
-    renderLogoPick();
-  });
-  $("#auto-toggle").addEventListener("change", onAutoToggle);
-  document.querySelectorAll(".tab[data-tab]").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && repoInfo) poll(0); });
 
-  store.remove("cfg"); // old GitHub token from the first version of the site
-  connect().catch((e) => showLogin(e.status === 401 ? "" : e.message));
+  $("#asset-kind").addEventListener("change", () => { $("#asset-handle-row").hidden = $("#asset-kind").value !== "logo"; });
+  $("#asset-add").addEventListener("click", onAssetAdd);
+  $("#asset-list").addEventListener("click", onAssetClick);
+
+  $("#memory-add").addEventListener("click", () => busy($("#memory-add"), async () => {
+    const note = $("#memory-note").value.trim();
+    if (!note) throw new Error("Write something to remember.");
+    await api("/api/memory", { method: "POST", body: { project_id: projectId, note } });
+    $("#memory-note").value = "";
+    await refresh();
+  }));
+  $("#memory-list").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-mem-act]");
+    if (btn) busy(btn, async () => { await api(`/api/memory/${btn.closest(".memory").dataset.id}`, { method: "DELETE" }); await refresh(); });
+  });
+
+  $("#brief-save").addEventListener("click", onBriefSave);
+  $("#project-delete").addEventListener("click", (e) => {
+    if (!confirmTwice(e.target, `Tap again to delete ${project().name} for good.`)) return;
+    busy(e.target, async () => {
+      await api(`/api/projects/${projectId}`, { method: "DELETE" });
+      projectId = "";
+      tab = "create";
+      store.set("tab", tab);
+      await refresh();
+    });
+  });
+
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && state) refresh().then(poll); });
+  refresh().then(() => state && poll());
 }
 
 init();
