@@ -1,5 +1,6 @@
-// Mi Media Content Lab website. Everything is stored by the Cloudflare worker (/api/*);
-// the brain (Antigravity on the PC helper) picks up queued posts from there.
+// Mi Media Content Lab website. Everything is stored by the Cloudflare worker (/api/*).
+// Brain: with a Gemini key saved, this page makes queued posts through /api/brain/* and draws the frame (compose.js);
+// without one, Antigravity on the PC helper picks them up.
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -49,6 +50,7 @@ async function refresh() {
     projectId = state.project;
     store.set("project", projectId);
     render();
+    runBrain();
   } catch (e) {
     if (e.status === 401) return showLogin();
     toast(e.message);
@@ -59,6 +61,44 @@ function poll() {
   clearTimeout(pollTimer);
   const busyNow = state && (state.queue > 0 || state.posts.some((p) => ["queued", "working"].includes(p.status)));
   pollTimer = setTimeout(async () => { await refresh(); poll(); }, busyNow ? 6000 : 30000);
+}
+
+// ---------- cloud brain ----------
+// The worker writes the words and makes the background; this page draws the logo and text on it (compose.js).
+
+let brainRunning = 0;
+const BRAIN_AT_ONCE = 2;
+
+function runBrain() {
+  if (!cloudBrain()) return;
+  const waiting = state.posts.filter((p) => p.status === "queued").length || (state.queue ? 1 : 0);
+  while (brainRunning < Math.min(BRAIN_AT_ONCE, waiting)) {
+    brainRunning++;
+    brainWorker().finally(() => { brainRunning--; });
+  }
+}
+
+async function brainWorker() {
+  try {
+    for (;;) {
+      const job = await api("/api/brain/make", { method: "POST" });
+      if (!job.id) return;
+      if (!job.error) {
+        const form = new FormData();
+        form.append("background_key", job.background_key);
+        try {
+          form.append("post", await composePost(job), "post.jpg");
+          form.append("data", JSON.stringify(job.data));
+        } catch (e) {
+          form.append("data", JSON.stringify({ error: `Could not draw the post: ${e.message}` }));
+        }
+        await api(`/api/brain/result/${job.id}`, { method: "POST", form });
+      }
+      await refresh();
+    }
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 // ---------- helpers ----------
@@ -84,6 +124,7 @@ function ago(iso) {
   return `${Math.round(s / 86400)} days ago`;
 }
 
+const cloudBrain = () => !!(state && state.brain && state.brain.cloud);
 const brainOnline = () => state && state.storage.pc && Date.now() - Date.parse(state.storage.pc.last_seen) < 5 * 60000;
 
 let toastTimer;
@@ -126,6 +167,13 @@ function render() {
 
 function renderBrain() {
   const waiting = state.queue;
+  $("#create-note").textContent = cloudBrain()
+    ? "Gemini makes posts in about 30 seconds each, while this page is open. Close it and they wait until you come back."
+    : "The brain makes posts one by one, about 3 minutes each. You can close this page and come back.";
+  if (cloudBrain()) {
+    $("#brain-line").innerHTML = `<b class="ok">●</b> Brain online (Gemini, on the website)${waiting ? ` · ${waiting} in line · keep this page open` : ""}`;
+    return;
+  }
   $("#brain-line").innerHTML = brainOnline()
     ? `<b class="ok">●</b> Brain online (your PC, Antigravity)${state.storage.pc.job ? " · making a post now" : ""}${waiting ? ` · ${waiting} waiting` : ""}`
     : `<b class="bad">●</b> Brain offline${state.storage.pc ? ` (last seen ${ago(state.storage.pc.last_seen)})` : ""}. Posts wait until the PC helper runs.${waiting ? ` ${waiting} waiting.` : ""}`;
@@ -180,7 +228,10 @@ function cardHtml(p) {
   const making = p.status === "queued" || p.status === "working";
   const img = p.post_key ? `/api/file/${p.post_key}` : "";
   const overlay = making
-    ? `<div class="busy">${p.status === "working" ? "The brain is making this…" : brainOnline() ? "Waiting in line…" : "Waiting for the brain…"}<br>
+    ? cloudBrain()
+      ? `<div class="busy">${p.status === "working" ? "Gemini is making this…" : "Waiting in line…"}<br>
+       <span class="muted small">${p.status === "working" ? "about 30 seconds" : "keep this page open"}</span></div>`
+      : `<div class="busy">${p.status === "working" ? "The brain is making this…" : brainOnline() ? "Waiting in line…" : "Waiting for the brain…"}<br>
        <span class="muted small">${p.status === "working" ? "about 3 minutes" : brainOnline() ? "it makes posts one by one" : "start the PC helper"}</span></div>` : "";
   let html = `<article class="card" data-id="${esc(p.id)}">
     <div class="pic" style="aspect-ratio: ${RATIO[p.aspect] || RATIO["4:5"]}">${img ? `<img src="${img}" alt="${esc(p.headline)}" loading="lazy">` : ""}${overlay}</div>
@@ -262,6 +313,11 @@ async function loadPlatforms(force) {
 }
 
 function renderPlatforms() {
+  $("#gemini-status").innerHTML = cloudBrain()
+    ? `<b class="ok">●</b> Key saved (ends in ${esc(state.brain.key_tail)}). Gemini writes and Cloudflare draws; your PC is not needed.`
+    : `<b class="bad">●</b> No key yet. Posts are made by Antigravity on your PC (about 3 minutes each).`;
+  $("#gemini-remove").hidden = !cloudBrain();
+  $("#gemini-key").placeholder = cloudBrain() ? "Paste a new key to replace it" : "Paste the key (starts with AIza)";
   if (!zern) {
     $("#zernio-status").textContent = "Loading…";
     loadPlatforms().then(renderPlatforms, (e) => { $("#zernio-status").textContent = e.message; });
@@ -707,6 +763,18 @@ function init() {
   $("#brief-save").addEventListener("click", onBriefSave);
 
   $("#channels").addEventListener("change", onChannelChange);
+  $("#gemini-save").addEventListener("click", () => busy($("#gemini-save"), async () => {
+    const key = $("#gemini-key").value.trim();
+    if (!key) throw new Error("Paste the Gemini API key first.");
+    await api("/api/brain", { method: "PUT", body: { key } });
+    $("#gemini-key").value = "";
+    toast("Key works. Gemini makes your posts now.");
+    await refresh();
+  }));
+  $("#gemini-remove").addEventListener("click", (e) => {
+    if (!confirmTwice(e.target, "Tap again to remove the Gemini key. Posts go back to Antigravity on your PC.")) return;
+    busy(e.target, async () => { await api("/api/brain", { method: "DELETE" }); await refresh(); });
+  });
   $("#zernio-save").addEventListener("click", () => busy($("#zernio-save"), async () => {
     const key = $("#zernio-key").value.trim();
     if (!key) throw new Error("Paste the Zernio API key first.");

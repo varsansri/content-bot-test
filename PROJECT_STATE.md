@@ -22,6 +22,13 @@ An Instagram content bot. You give it instructions on a **website** (GitHub Page
 | Drafts | `drafts` branch of the repo |
 | Setup guide for the recipient | `README.md` |
 
+## 28 Oct: Gemini brain on the website (NOT live until he runs ~/labposting.sh, then pastes the key)
+- Why: Antigravity took ~6 min a post (two cold agy runs: text, then picture; one job at a time; low priority).
+- Now: Platforms tab -> **Brain (Gemini)** box. Key kept in D1 `settings` (gemini_key), never sent back. While a key is saved, /api/agent/next gives the PC helper nothing.
+- The open page runs queued posts (2 at a time): POST /api/brain/make -> worker claims a post, Gemini writes (models gemini-flash-latest -> 2.5-flash -> flash-lite on 404/429/5xx; web search tool, retried without it), reference pictures + own photo go to Gemini's Files API straight from KV; Workers AI flux-1-schnell draws (binding AI, 1024x1024, ~4.5 s). The page draws the brand frame (docs/compose.js = port of images.compose; fonts in docs/fonts) and sends POST /api/brain/result/<id>.
+- Page closed = posts wait in line (and a half-made one goes back to the queue after 15 min).
+- Tests: scratchpad test_brain.mjs 26/26 with fake Gemini/AI; compose.js drawn in headless Chrome matched this morning's PIL post; one real flux picture made via wrangler dev. NOT tested with a real Gemini key yet.
+
 ## 28 Oct: one-command start + Zernio posting (commit e843bbb, NOT live until he runs ~/labposting.sh)
 - **`lab`** starts the brain in a minimised window (works in PowerShell, cmd, Win+R, `!`). `lab stop`, `lab status`. Files: `~/.local/bin/lab.cmd` + `~/.local/bin/lab` (bash). pc_helper.py holds a Windows mutex, so a second copy closes itself.
 - **Platforms tab:** paste the Zernio API key (kept in D1 `settings`, never sent back to the browser); lists Zernio accounts for Instagram, Threads, X, LinkedIn, YouTube; tick which ones each project posts to (brief.channels).

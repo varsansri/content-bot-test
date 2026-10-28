@@ -1,10 +1,11 @@
-// Mi Media Content Lab on Cloudflare: the whole system except the brain.
-// Serves the website (docs/), keeps projects, briefs, memory, assets and posts (D1 + KV), and hands
-// jobs to the brain (Antigravity on the PC helper) through /api/agent/*.
+// Mi Media Content Lab on Cloudflare: the whole system.
+// Serves the website (docs/), keeps projects, briefs, memory, assets and posts (D1 + KV) and makes posts.
+// Brain: with a Gemini key saved, Gemini writes and Workers AI draws (/api/brain/*), and the open website
+// draws the brand frame (docs/compose.js). Without one, Antigravity on the PC helper does it (/api/agent/*).
 //
 // Secrets: PASSWORD, SESSION_KEY (website login), AGENT_TOKEN (the PC helper's key).
-// The Zernio API key is not a secret here: it is typed into the Platforms tab and kept in D1 settings.
-// Bindings: DB (D1), FILES (KV), ASSETS (static site).
+// The Zernio and Gemini keys are not secrets here: they are typed into the Platforms tab and kept in D1 settings.
+// Bindings: DB (D1), FILES (KV), AI (Workers AI), ASSETS (static site).
 
 const COOKIE = "lab";
 const SESSION_DAYS = 30;
@@ -136,7 +137,7 @@ const PLATFORMS = {
 };
 
 async function setting(env, k) {
-  const row = await one(env, "SELECT v FROM settings WHERE k = ?", k);
+  const row = await one(env, "SELECT v FROM settings WHERE k = ?", k).catch(() => null); // no settings table yet = no keys
   return row ? row.v : "";
 }
 
@@ -256,6 +257,245 @@ async function checkSocial(env, post) {
     failed.map((t) => `${PLATFORMS[t.platform] ? PLATFORMS[t.platform].name : t.platform}: ${t.error || "failed"}`).join("\n").slice(0, 800), now(), post.id);
 }
 
+// ---------- cloud brain: Gemini writes, Workers AI draws ----------
+// The Gemini key is typed into the Platforms tab and kept in D1 (settings), like the Zernio key.
+// While it is saved the PC helper gets no jobs: the open website asks /api/brain/make for each queued post,
+// draws the brand frame on the picture and sends it back to /api/brain/result.
+
+const GEMINI = "https://generativelanguage.googleapis.com";
+const GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"]; // next one when a model is busy or gone
+const PICTURE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+const SHAPE_WORDS = { "4:5": "Vertical portrait composition", "1:1": "Square composition", "9:16": "Tall vertical 9:16 composition" };
+
+async function geminiCheck(key) {
+  const res = await fetch(`${GEMINI}/v1beta/models?pageSize=1`, { headers: { "x-goog-api-key": key } });
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({}));
+  throw new Error("Gemini did not accept that key: " + ((data.error && data.error.message) || `HTTP ${res.status}`));
+}
+
+async function gemini(key, body) {
+  let last = "";
+  for (const model of GEMINI_MODELS) {
+    const res = await fetch(`${GEMINI}/v1beta/models/${model}:generateContent`, {
+      method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const cand = (data.candidates || [])[0] || {};
+      const text = ((cand.content && cand.content.parts) || []).filter((p) => !p.thought).map((p) => p.text || "").join("");
+      if (text.trim()) return text;
+      last = `no answer (${cand.finishReason || (data.promptFeedback && data.promptFeedback.blockReason) || "empty"})`;
+      continue;
+    }
+    last = (data.error && data.error.message) || `HTTP ${res.status}`;
+    if (res.status === 429) last = "the free Gemini allowance is used up for now. Try again later. " + last.split("\n")[0];
+    if (![404, 429, 500, 503].includes(res.status)) break; // a bad key or request fails the same on every model
+  }
+  throw new Error("Gemini: " + last);
+}
+
+// Pictures go to Gemini through its Files API, straight from KV (they are deleted by Google after 48 hours).
+async function geminiFile(env, key, fileKey, mime) {
+  const data = await env.FILES.get(fileKey, { type: "arrayBuffer" });
+  if (!data) return null;
+  const start = await fetch(`${GEMINI}/upload/v1beta/files`, {
+    method: "POST",
+    headers: { "x-goog-api-key": key, "Content-Type": "application/json", "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(data.byteLength), "X-Goog-Upload-Header-Content-Type": mime },
+    body: JSON.stringify({ file: { display_name: fileKey } }),
+  });
+  const upload = start.headers.get("x-goog-upload-url");
+  if (!upload) return null;
+  const done = await fetch(upload, { method: "POST", headers: { "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: data });
+  const file = (await done.json().catch(() => ({}))).file;
+  return file && file.uri ? { file_data: { mime_type: mime, file_uri: file.uri } } : null;
+}
+
+// The brief in the shape the brain and the post design expect, with this post's logo (same as pc_helper.brand_for).
+function brandFor(project, assets, post) {
+  const brand = parse(project.brief, {});
+  brand.brand_name ||= project.name;
+  brand.fonts ||= { headline: "fonts/Poppins-Bold.ttf", body: "fonts/Poppins-Regular.ttf" };
+  const logos = assets.filter((a) => a.kind === "logo");
+  const choice = post.logo_id || brand.default_logo || (logos[0] ? logos[0].id : "none");
+  const logo = logos.find((a) => a.id === choice);
+  brand.logo = null; // missing = no logo
+  if (logo) {
+    const s = parse(logo.settings, {});
+    brand.logo = { url: `/api/file/${logo.file_key}`, width: Number(s.width) || 180, position: brand.logo_position || "top-left" };
+    if (s.handle) brand.instagram_handle = s.handle;
+  }
+  return brand;
+}
+
+function systemPrompt(brand) {
+  const examples = (brand.example_captions || []).map((c) => `- ${c}`).join("\n\n");
+  return `You write Instagram posts for the brand "${brand.brand_name}" (${brand.instagram_handle || ""}).
+
+About the account: ${brand.about || ""}
+Voice: ${brand.voice || ""}
+Write in: ${brand.language || "English"}
+
+Every post is one picture (4:5) with a short headline printed on it, plus a caption.
+
+Rules for each field:
+- topic: the subject of this post in a few words.
+- headline: printed big on the picture. At most 8 words. Punchy, no hashtags, no emojis.
+- subtext: one short line printed under the headline (at most 14 words), or "" if not needed.
+- caption: the Instagram caption. Hook in the first line, then useful content, then a call to action. Line breaks are fine. Do NOT put hashtags in the caption. Under 1500 characters.
+- hashtags: ${brand.hashtag_count || 8} relevant hashtags, each starting with #. Mix popular and niche.
+- image_prompt: a description for an AI image generator of the BACKGROUND picture only. Visual scene, no words. Never ask for text, letters, logos or watermarks in the picture. The style is added automatically, so describe only the scene.
+
+Example captions in the brand's voice:
+${examples || "- (none given)"}`;
+}
+
+function memoryText(memory, timeZone) {
+  const fmt = new Intl.DateTimeFormat("en-GB", { timeZone, day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  const line = (m) => `- [${fmt.format(new Date(m.created))}] ${m.note}`;
+  const parts = [];
+  if (memory.hints.length) parts.push("KEY HINTS AND RULES (highlighted; always follow these first):\n" + memory.hints.map(line).join("\n"));
+  if (memory.lessons.length) parts.push("Lessons and the owner's feedback (newest last):\n" + memory.lessons.map((m) => line(m) + (m.kind === "feedback" ? " (feedback)" : "")).join("\n"));
+  if (memory.log.length) parts.push("Your recent work log (what you made, when):\n" + memory.log.map(line).join("\n"));
+  return parts.join("\n\n");
+}
+
+async function writeText(env, key, brand, post, memory, recent, references, photo) {
+  let ask = post.topic ? `Write a post about: ${post.topic}`
+    : "Pick a fresh angle from one of these topics and write a post:\n" + (brand.topics || []).map((t) => `- ${t}`).join("\n");
+  if (recent.length) ask += "\n\nDo not repeat these recent headlines or their ideas:\n" + recent.map((h) => `- ${h}`).join("\n");
+  const timeZone = brand.timezone || "Asia/Kolkata";
+  const remembered = memoryText(memory, timeZone);
+  if (remembered) ask += "\n\nYOUR MEMORY OF THIS PROJECT:\n" + remembered;
+  ask += `\n\nNow is ${new Intl.DateTimeFormat("en-GB", { timeZone, weekday: "long", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date())}.`;
+
+  const parts = [];
+  for (const r of references) {
+    const part = await geminiFile(env, key, r.file_key, r.mime).catch(() => null);
+    if (part) parts.push(part, { text: `(Reference picture: ${r.note || r.name})` });
+    else ask += `\n\nReference (not shown): ${r.note || r.name}`;
+  }
+  if (references.length) ask += "\n\nLook at the attached reference pictures for style and facts.";
+  if (photo) {
+    const part = await geminiFile(env, key, photo.file_key, photo.mime).catch(() => null);
+    if (part) parts.push(part);
+    ask += `\n\nThe ${part ? "attached photo" : `owner's photo "${photo.name}"`} will be the picture of this post. Write about it. image_prompt can be "".`;
+  }
+  ask += "\n\nYou may search the web for current facts or trends if it helps.";
+  parts.push({ text: ask + "\n\nReply with ONLY one JSON object with exactly these keys: topic, headline, subtext, caption, hashtags (a list), "
+    + "image_prompt, learned (a list of 0-2 short NEW lessons about what this owner likes, taken from the feedback above; "
+    + "[] if nothing new), hint (ONE short new rule worth highlighting so the next post comes out right, for example a "
+    + "picture style the owner keeps approving; \"\" unless it is new, important and not already in your key hints). No other text." });
+
+  const body = { systemInstruction: { parts: [{ text: systemPrompt(brand) }] }, contents: [{ role: "user", parts }], generationConfig: { temperature: 1 } };
+  let reply;
+  try {
+    reply = await gemini(key, { ...body, tools: [{ google_search: {} }] });
+  } catch {
+    reply = await gemini(key, body); // web search is limited on the free allowance; write without it
+  }
+  const start = reply.indexOf("{");
+  const end = reply.lastIndexOf("}");
+  const out = start >= 0 && end > start ? parse(reply.slice(start, end + 1), null) : null;
+  if (!out) throw new Error("Gemini did not send the post text. Reply: " + reply.trim().slice(-200));
+  if (!out.headline || !out.caption) throw new Error("Gemini's text is missing the headline or caption.");
+  const seen = new Map();
+  for (const t of [...(brand.always_hashtags || []), ...(out.hashtags || []).map((t) => (String(t).startsWith("#") ? String(t) : "#" + t))]) {
+    if (!seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t); // one of each, whatever the capitals
+  }
+  return {
+    headline: String(out.headline), subtext: String(out.subtext || ""), caption: String(out.caption),
+    hashtags: [...seen.values()].slice(0, 30), image_prompt: String(out.image_prompt || ""),
+    learned: (out.learned || []).map(String).slice(0, 2), hint: String(out.hint || "").trim().slice(0, 300),
+  };
+}
+
+async function makePicture(env, prompt, brand, aspect) {
+  const style = brand.image_style || "";
+  const avoid = brand.image_avoid || "text, letters, words, watermark, logo";
+  const full = `${prompt}. Style: ${style}. ${SHAPE_WORDS[aspect] || SHAPE_WORDS["4:5"]}. No ${avoid}.`.slice(0, 2000);
+  const out = await env.AI.run(PICTURE_MODEL, { prompt: full, steps: 8 });
+  if (!out || !out.image) throw new Error("Cloudflare's picture AI sent no picture.");
+  const bin = atob(out.image);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Claim the oldest queued post and make its words and background. The website draws the frame and sends /api/brain/result.
+async function brainMake(env) {
+  const key = await setting(env, "gemini_key");
+  if (!key) throw new Error("Add your Gemini API key in the Platforms tab first.");
+  await requeueStale(env);
+  const post = await one(env, "SELECT * FROM posts WHERE status = 'queued' ORDER BY created LIMIT 1");
+  if (!post) return { id: null };
+  const claimed = await run(env, "UPDATE posts SET status = 'working', claimed_at = ? WHERE id = ? AND status = 'queued'", now(), post.id);
+  if (!claimed.meta.changes) return brainMake(env); // another open page took it; try the next one
+  const [project, assets, memory, recent] = await Promise.all([
+    one(env, "SELECT * FROM projects WHERE id = ?", post.project_id),
+    all(env, "SELECT * FROM assets WHERE project_id = ?", post.project_id),
+    memoryForBrain(env, post.project_id),
+    all(env, "SELECT headline FROM posts WHERE project_id = ? AND headline != '' AND id != ? ORDER BY created DESC LIMIT 25", post.project_id, post.id),
+  ]);
+  let bgKey = "";
+  try {
+    const brand = brandFor(project, assets, post);
+    const photo = post.photo_id ? assets.find((a) => a.id === post.photo_id) : null;
+    let data = {};
+    if (post.job === "new" || post.job === "text") {
+      const references = assets.filter((a) => a.kind === "reference" && a.mime.startsWith("image/") && a.bytes < 8_000_000).slice(0, 4);
+      data = await writeText(env, key, brand, post, memory, recent.map((r) => r.headline), references, photo);
+    }
+    if (photo) {
+      bgKey = await putFile(env, await env.FILES.get(photo.file_key, { type: "arrayBuffer" }), photo.mime); // a copy: removing the post must not delete the photo
+    } else if (post.job === "text" && post.background_key) {
+      bgKey = post.background_key;
+    } else {
+      bgKey = await putFile(env, await makePicture(env, data.image_prompt || post.image_prompt || data.headline || post.headline, brand, post.aspect), "image/jpeg");
+    }
+    const { logo, colors, fonts, overlay_strength, black_and_white, instagram_handle } = brand;
+    return {
+      id: post.id, aspect: post.aspect, data, background_key: bgKey,
+      headline: data.headline ?? post.headline, subtext: data.subtext ?? post.subtext,
+      brand: { logo, colors, fonts, overlay_strength, black_and_white, instagram_handle },
+    };
+  } catch (e) {
+    await saveResult(env, post, { error: e.message || "Something went wrong." }, null, bgKey);
+    return { id: post.id, error: e.message };
+  }
+}
+
+async function fileBytes(env, key) {
+  const { value, metadata } = await env.FILES.getWithMetadata(key, { type: "stream" });
+  if (value) await value.cancel();
+  return (metadata && metadata.bytes) || 0;
+}
+
+// A finished (or failed) post from either brain. bgKey is the background already in KV.
+async function saveResult(env, post, data, postFile, bgKey, bgBytes) {
+  const t = now();
+  if (data.error) {
+    if (bgKey && bgKey !== post.background_key) await deleteFile(env, bgKey);
+    await run(env, "UPDATE posts SET status = ?, error = ?, claimed_at = '', updated = ? WHERE id = ?",
+      post.post_key ? "draft" : "failed", String(data.error).slice(0, 800), t, post.id);
+    return;
+  }
+  const postKey = await putFile(env, await postFile.arrayBuffer(), "image/jpeg");
+  await Promise.all([deleteFile(env, post.post_key), bgKey !== post.background_key && deleteFile(env, post.background_key)]);
+  const bytes = postFile.size + (bgBytes ?? (await fileBytes(env, bgKey)));
+  await run(env, `UPDATE posts SET status = 'draft', job = 'new', error = '', claimed_at = '', headline = ?, subtext = ?, caption = ?, hashtags = ?,
+    image_prompt = ?, post_key = ?, background_key = ?, bytes = ?, updated = ? WHERE id = ?`,
+    String(data.headline ?? post.headline), String(data.subtext ?? post.subtext), String(data.caption ?? post.caption),
+    JSON.stringify(data.hashtags ?? parse(post.hashtags, [])), String(data.image_prompt ?? post.image_prompt), postKey, bgKey, bytes, t, post.id);
+  // The brain's own notes: a dated log line for every job, its lessons, and at most one highlighted hint.
+  const what = { new: "Made", picture: "Made a new picture for", text: "Rewrote the words of" }[post.job] || "Made";
+  await remember(env, post.project_id, "brain",
+    `${what} post "${String(data.headline ?? post.headline)}" (${post.aspect})${post.topic ? ` about: ${post.topic.slice(0, 160)}` : " from the brief topics"}.`, "log");
+  for (const note of (data.learned || []).slice(0, 2)) await remember(env, post.project_id, "brain", note, "lesson");
+  if (data.hint) await remember(env, post.project_id, "brain", data.hint, "hint", 1);
+}
+
 // ---------- website API ----------
 
 async function site(req, env, url) {
@@ -274,7 +514,40 @@ async function site(req, env, url) {
       all(env, "SELECT * FROM memory WHERE project_id = ? ORDER BY pinned DESC, created DESC LIMIT 300", pid),
     ]) : [[], [], []];
     const queue = await one(env, "SELECT COUNT(*) AS n FROM posts WHERE status IN ('queued', 'working')");
-    return json({ projects, project: pid, posts: posts.map(postOut), assets: assets.map(assetOut), memory, queue: queue.n, storage: await storage(env) });
+    const gem = await setting(env, "gemini_key");
+    return json({ projects, project: pid, posts: posts.map(postOut), assets: assets.map(assetOut), memory, queue: queue.n, storage: await storage(env),
+      brain: { cloud: !!gem, key_tail: gem.slice(-4) } });
+  }
+
+  // Platforms tab: the Gemini key (the cloud brain).
+  if (p === "/api/brain") {
+    if (m === "PUT") {
+      const key = String(body.key || "").trim();
+      if (!key) return fail("Paste the Gemini API key.");
+      await geminiCheck(key); // fails here if the key is wrong
+      await run(env, "INSERT INTO settings (k, v) VALUES ('gemini_key', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", key);
+      return json({ ok: true });
+    }
+    if (m === "DELETE") {
+      await run(env, "DELETE FROM settings WHERE k = 'gemini_key'");
+      return json({ ok: true });
+    }
+  }
+  if (p === "/api/brain/make" && m === "POST") return json(await brainMake(env));
+
+  let rm;
+  if ((rm = p.match(/^\/api\/brain\/result\/([\w-]+)$/)) && m === "POST") {
+    const post = await one(env, "SELECT * FROM posts WHERE id = ?", rm[1]);
+    if (!post || post.status !== "working") return fail("This post is not being made any more.", 409);
+    const form = await req.formData();
+    const data = parse(form.get("data") || "{}", {});
+    const bgKey = String(form.get("background_key") || "");
+    const postFile = form.get("post");
+    if (!data.error && (!postFile || typeof postFile === "string" || !bgKey)) return fail("Send the finished post.");
+    if (bgKey && bgKey !== post.background_key && await one(env, `SELECT 1 FROM assets WHERE file_key = ?1
+      UNION ALL SELECT 1 FROM posts WHERE post_key = ?1 OR background_key = ?1`, bgKey)) return fail("That background belongs to something else.");
+    await saveResult(env, post, data, data.error ? null : postFile, bgKey);
+    return json({ ok: true });
   }
 
   if (p === "/api/projects" && m === "POST") {
@@ -455,6 +728,7 @@ async function agent(req, env, url) {
 
   // Claim the oldest queued post and send everything the brain needs to make it.
   if (p === "/api/agent/next" && req.method === "POST") {
+    if (await setting(env, "gemini_key")) return json({ job: null }); // the cloud brain makes the posts now
     await requeueStale(env);
     const post = await one(env, "SELECT * FROM posts WHERE status = 'queued' ORDER BY created LIMIT 1");
     if (!post) return json({ job: null });
@@ -481,32 +755,14 @@ async function agent(req, env, url) {
     if (!post) return fail("No such post.", 404);
     const form = await req.formData();
     const data = parse(form.get("data") || "{}", {});
-    const t = now();
     if (data.error) {
-      await run(env, "UPDATE posts SET status = ?, error = ?, claimed_at = '', updated = ? WHERE id = ?",
-        post.post_key ? "draft" : "failed", String(data.error).slice(0, 800), t, post.id);
+      await saveResult(env, post, data, null, "");
       return json({ ok: true });
     }
-    const keys = {};
-    for (const name of ["post", "background"]) {
-      const f = form.get(name);
-      if (f && typeof f !== "string") keys[name] = await putFile(env, await f.arrayBuffer(), "image/jpeg");
-    }
-    if (!keys.post || !keys.background) return fail("Send both the post and the background picture.");
-    await Promise.all([deleteFile(env, post.post_key), deleteFile(env, post.background_key)]);
-    const postKey = keys.post;
-    const bgKey = keys.background;
-    const bytes = form.get("post").size + form.get("background").size;
-    await run(env, `UPDATE posts SET status = 'draft', job = 'new', error = '', claimed_at = '', headline = ?, subtext = ?, caption = ?, hashtags = ?,
-      image_prompt = ?, post_key = ?, background_key = ?, bytes = ?, updated = ? WHERE id = ?`,
-      String(data.headline ?? post.headline), String(data.subtext ?? post.subtext), String(data.caption ?? post.caption),
-      JSON.stringify(data.hashtags ?? parse(post.hashtags, [])), String(data.image_prompt ?? post.image_prompt), postKey, bgKey, bytes, t, post.id);
-    // The brain's own notes: a dated log line for every job, its lessons, and at most one highlighted hint.
-    const what = { new: "Made", picture: "Made a new picture for", text: "Rewrote the words of" }[post.job] || "Made";
-    await remember(env, post.project_id, "brain",
-      `${what} post "${String(data.headline ?? post.headline)}" (${post.aspect})${post.topic ? ` about: ${post.topic.slice(0, 160)}` : " from the brief topics"}.`, "log");
-    for (const note of (data.learned || []).slice(0, 2)) await remember(env, post.project_id, "brain", note, "lesson");
-    if (data.hint) await remember(env, post.project_id, "brain", data.hint, "hint", 1);
+    const postFile = form.get("post");
+    const background = form.get("background");
+    if (!postFile || typeof postFile === "string" || !background || typeof background === "string") return fail("Send both the post and the background picture.");
+    await saveResult(env, post, data, postFile, await putFile(env, await background.arrayBuffer(), "image/jpeg"), background.size);
     return json({ ok: true });
   }
 

@@ -80,7 +80,7 @@
           <p class="muted small">With your own photo the brain makes one post and only writes the words.</p>
         </details>
         <button id="new-go" class="primary wide big">Make 1 post</button>
-        <p class="muted small center">The brain makes posts one by one, about 3 minutes each. You can close this page and come back.</p>
+        <p id="create-note" class="muted small center">The brain makes posts one by one, about 3 minutes each. You can close this page and come back.</p>
       </div>
 
       <div class="filters" id="filters">
@@ -150,6 +150,16 @@
     <!-- Platforms -->
     <section id="platforms" hidden>
       <div class="panel">
+        <h2>Brain (Gemini)</h2>
+        <p class="muted small">With a Gemini key, Gemini writes the words and Cloudflare's free picture AI draws the background, right here on the website: about 30 seconds a post, and your PC can be off. Make a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and paste it here. It is kept on the server and never shown again.</p>
+        <p id="gemini-status" class="muted"></p>
+        <label>Gemini API key <input id="gemini-key" type="password" autocomplete="off" placeholder="Paste the key (starts with AIza)"></label>
+        <div class="row">
+          <button id="gemini-save" class="primary">Save key</button>
+          <button id="gemini-remove" class="danger" hidden>Remove key</button>
+        </div>
+      </div>
+      <div class="panel">
         <h2>Zernio (posts for you)</h2>
         <p class="muted small">Zernio sends approved posts to Instagram, Threads, X, LinkedIn and YouTube. Connect your accounts on <a href="https://zernio.com" target="_blank" rel="noopener">zernio.com</a>, make an API key there, and paste it here. It is kept on the server and never shown again.</p>
         <p id="zernio-status" class="muted"></p>
@@ -185,6 +195,7 @@
   </main>
 
   <div id="toast" role="status" hidden></div>
+  <script src="compose.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
