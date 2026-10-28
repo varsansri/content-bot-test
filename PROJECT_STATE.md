@@ -1,6 +1,6 @@
 # Mi Media Content Lab — project state
 
-Last updated: 26 Oct 2026
+Last updated: 28 Oct 2026
 
 ## What it is
 An Instagram content bot. You give it instructions on a **website** (GitHub Pages), and **GitHub Actions** does the work:
@@ -21,6 +21,13 @@ An Instagram content bot. You give it instructions on a **website** (GitHub Page
 | Old test website | https://varsansri.github.io/content-bot-test/ (token screen; replaced by the one above) |
 | Drafts | `drafts` branch of the repo |
 | Setup guide for the recipient | `README.md` |
+
+## 28 Oct: one-command start + Zernio posting (commit e843bbb, NOT live until he runs ~/labposting.sh)
+- **`lab`** starts the brain in a minimised window (works in PowerShell, cmd, Win+R, `!`). `lab stop`, `lab status`. Files: `~/.local/bin/lab.cmd` + `~/.local/bin/lab` (bash). pc_helper.py holds a Windows mutex, so a second copy closes itself.
+- **Platforms tab:** paste the Zernio API key (kept in D1 `settings`, never sent back to the browser); lists Zernio accounts for Instagram, Threads, X, LinkedIn, YouTube; tick which ones each project posts to (brief.channels).
+- **Post card:** 📤 Post / schedule -> tick accounts, Now or Later. Worker uploads the picture to Zernio (/v1/media/presign), then POST /v1/posts with per-platform text (X 280 = headline + 3 tags if the caption is long, Threads 500, LinkedIn 3000, IG 2200; 9:16 = IG Story). YouTube is shown but skipped: it takes videos only (Higgsfield later). Statuses scheduled/posted, "Posted" filter, Check status, Cancel schedule; Remove also cancels a scheduled post.
+- Offline test with fake Zernio: 21/21 pass (scratchpad test_zernio.mjs). Not tested against real Zernio yet (no key).
+- Go live: `! bash ~/labposting.sh` (adds settings table + posts.social column, deploys, pushes). Auto mode blocked me from running it.
 
 ## 27 Oct (late): site = the whole system, Antigravity = brain only (LIVE, verified)
 - Cloudflare worker `cloudflare/worker.js` holds everything: D1 `mi-media-lab` (projects, assets, posts, memory, helper; schema in cloudflare/schema.sql) + KV `mi-media-lab-files` (all files). GitHub is no longer used by the site.
