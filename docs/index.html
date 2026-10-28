@@ -21,6 +21,7 @@
       <button data-tab="assets" class="tab">Assets</button>
       <button data-tab="memory" class="tab">Memory</button>
       <button data-tab="brief" class="tab">Brief</button>
+      <button data-tab="platforms" class="tab">Platforms</button>
       <button data-tab="storage" class="tab">Storage</button>
       <button id="logout" class="tab">Log out</button>
     </nav>
@@ -85,6 +86,7 @@
       <div class="filters" id="filters">
         <button data-filter="review" class="on">To review <span></span></button>
         <button data-filter="approved">Approved <span></span></button>
+        <button data-filter="posted">Posted <span></span></button>
         <button data-filter="all">All <span></span></button>
       </div>
       <div id="list" class="list"></div>
@@ -142,6 +144,26 @@
         <h2>Delete this project</h2>
         <p class="muted small">Removes its posts, assets and memory for good.</p>
         <button id="project-delete" class="danger">Delete project</button>
+      </div>
+    </section>
+
+    <!-- Platforms -->
+    <section id="platforms" hidden>
+      <div class="panel">
+        <h2>Zernio (posts for you)</h2>
+        <p class="muted small">Zernio sends approved posts to Instagram, Threads, X, LinkedIn and YouTube. Connect your accounts on <a href="https://zernio.com" target="_blank" rel="noopener">zernio.com</a>, make an API key there, and paste it here. It is kept on the server and never shown again.</p>
+        <p id="zernio-status" class="muted"></p>
+        <label>Zernio API key <input id="zernio-key" type="password" autocomplete="off" placeholder="Paste the key"></label>
+        <div class="row">
+          <button id="zernio-save" class="primary">Save key</button>
+          <button id="zernio-reload">↻ Reload accounts</button>
+          <button id="zernio-remove" class="danger" hidden>Remove key</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2 id="channels-title">Where this project posts</h2>
+        <p class="muted small">Tick the accounts this project posts to. You can still change them for each post.</p>
+        <div id="channels"></div>
       </div>
     </section>
 

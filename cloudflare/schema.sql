@@ -66,3 +66,11 @@ CREATE TABLE IF NOT EXISTS helper (
 -- kind: hint (highlighted, read first) | rule (you) | lesson (brain) | feedback | log (what the brain made, when)
 -- ALTER TABLE memory ADD COLUMN kind TEXT NOT NULL DEFAULT 'lesson';
 -- ALTER TABLE memory ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+
+-- 28 Oct: posting through Zernio (applied with ALTER on the live database)
+-- social: JSON {id: Zernio post id, status, when, targets: [{platform, name, status, url, error}]}; post status adds scheduled | posted
+-- ALTER TABLE posts ADD COLUMN social TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,                    -- zernio_key
+  v TEXT NOT NULL
+);

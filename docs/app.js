@@ -22,6 +22,8 @@ let logoChoice = ""; // asset id, "none", or "" for the project default
 let editing = null;
 let pollTimer = null;
 let memFilter = store.get("memFilter", "pinned");
+let zern = null; // { has_key, key_tail, accounts, platforms, error } from /api/platforms
+let sharing = null; // post id whose Post / schedule box is open
 
 // ---------- server ----------
 
@@ -100,7 +102,7 @@ async function busy(btn, fn) {
 
 // ---------- rendering ----------
 
-const SECTIONS = ["login", "welcome", "create", "assets", "memory", "brief", "storage"];
+const SECTIONS = ["login", "welcome", "create", "assets", "memory", "brief", "platforms", "storage"];
 
 function showSection(name) {
   for (const id of SECTIONS) $(`#${id}`).hidden = id !== name;
@@ -119,6 +121,7 @@ function render() {
   if (tab === "memory") renderMemory();
   if (tab === "brief" && $("#brief-form").dataset.project !== projectId) renderBrief();
   if (tab === "storage") renderStorage();
+  if (tab === "platforms") renderPlatforms();
 }
 
 function renderBrain() {
@@ -130,8 +133,9 @@ function renderBrain() {
 
 const RATIO = { "4:5": "4 / 5", "1:1": "1 / 1", "9:16": "9 / 16" };
 const SIZE_NAME = { "4:5": "Portrait", "1:1": "Square", "9:16": "Story" };
-const STATUS = { queued: "Waiting for the brain", working: "Being made", draft: "Ready to review", approved: "Approved", failed: "Failed" };
-const inFilter = (p) => filter === "all" || (filter === "approved" ? p.status === "approved" : p.status !== "approved");
+const STATUS = { queued: "Waiting for the brain", working: "Being made", draft: "Ready to review", approved: "Approved", scheduled: "Scheduled", posted: "Posted", failed: "Failed" };
+const SHELF = (p) => (p.status === "approved" ? "approved" : ["scheduled", "posted"].includes(p.status) ? "posted" : "review");
+const inFilter = (p) => filter === "all" || SHELF(p) === filter;
 
 function currentLogo() {
   if (logoChoice === "none") return "none";
@@ -156,7 +160,8 @@ function renderCreate() {
 
 function renderList() {
   const posts = state.posts;
-  const counts = { review: posts.filter((p) => p.status !== "approved").length, approved: posts.filter((p) => p.status === "approved").length, all: posts.length };
+  const counts = { all: posts.length };
+  for (const k of ["review", "approved", "posted"]) counts[k] = posts.filter((p) => SHELF(p) === k).length;
   document.querySelectorAll("#filters button").forEach((b) => {
     b.classList.toggle("on", b.dataset.filter === filter);
     b.querySelector("span").textContent = counts[b.dataset.filter] ? `(${counts[b.dataset.filter]})` : "";
@@ -191,22 +196,104 @@ function cardHtml(p) {
     html += `<div class="caption">${esc(p.caption)}</div>`;
     if (p.hashtags.length) html += `<div class="tags">${esc(p.hashtags.join(" "))}</div>`;
   }
+  if (p.social && p.social.targets && p.social.targets.length) html += socialHtml(p);
+  if (sharing === p.id) html += shareHtml(p);
   if (img && p.caption && !making) {
     html += `<div class="actions"><a class="btn" href="${img}" download="${esc(p.id)}.jpg">⬇ Download picture</a><button data-act="copy">📋 Copy caption</button></div>`;
   }
   if (p.status === "draft") {
     html += `<div class="actions">
       <button class="primary" data-act="approve">✓ Approve</button>
+      <button data-act="share">📤 Post / schedule</button>
       ${p.photo_id ? "" : `<button data-act="picture">🖼 New picture</button>`}
       <button data-act="text">✍️ New words</button>
       <button data-act="edit">✏️ Edit caption</button>
       <button class="danger" data-act="remove">🗑 Remove</button></div>`;
   } else if (p.status === "approved") {
-    html += `<div class="actions"><button data-act="text">✍️ New words</button><button class="danger" data-act="remove">🗑 Remove</button></div>`;
+    html += `<div class="actions"><button class="primary" data-act="share">📤 Post / schedule</button><button data-act="text">✍️ New words</button><button class="danger" data-act="remove">🗑 Remove</button></div>`;
+  } else if (p.status === "scheduled") {
+    html += `<div class="actions"><button data-act="check">↻ Check status</button><button data-act="unschedule">Cancel schedule</button></div>`;
+  } else if (p.status === "posted") {
+    html += `<div class="actions"><button data-act="check">↻ Check status</button><button data-act="share">📤 Post again</button><button class="danger" data-act="remove">🗑 Remove from the list</button></div>`;
   } else if (p.status === "failed") {
     html += `<div class="actions"><button data-act="retry">Try again</button><button class="danger" data-act="remove">🗑 Remove</button></div>`;
   }
   return html + `</div></article>`;
+}
+
+const platName = (k) => (zern && zern.platforms[k] ? zern.platforms[k].name : k);
+const TARGET = { published: "posted", failed: "failed", pending: "waiting", scheduled: "scheduled", processing: "being posted", uploading: "being posted", publishing: "being posted", cancelled: "cancelled" };
+
+function socialHtml(p) {
+  const s = p.social;
+  const head = p.status === "scheduled" && s.when ? `<b>Goes out ${esc(new Date(s.when).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}</b>` : "";
+  return `${head}<ul class="targets">${s.targets.map((t) => `<li>${t.status === "published" ? "✅" : t.status === "failed" ? "❌" : "🕓"} ${esc(platName(t.platform))} ${esc(t.name)}
+    · ${esc(TARGET[t.status] || t.status)}${t.url ? ` · <a href="${esc(t.url)}" target="_blank" rel="noopener">open ↗</a>` : ""}</li>`).join("")}</ul>`;
+}
+
+// Accounts that can take a picture post (YouTube takes videos only).
+const pictureAccounts = () => (zern ? zern.accounts.filter((a) => a.ok && !zern.platforms[a.platform].video) : []);
+
+function shareHtml(p) {
+  if (!zern) return `<div class="share muted small">Loading your platforms…</div>`;
+  if (!zern.has_key) return `<div class="share">Add your Zernio API key in the <b>Platforms</b> tab first. <button data-act="go-platforms">Open Platforms</button></div>`;
+  const list = pictureAccounts();
+  if (!list.length) return `<div class="share">${esc(zern.error || "No accounts are connected in Zernio yet.")} Connect them on zernio.com, then reload in the Platforms tab.</div>`;
+  const picked = brief().channels || [];
+  const soon = new Date(Date.now() + 3600000);
+  soon.setMinutes(0, 0, 0);
+  const local = new Date(soon.getTime() - soon.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  return `<div class="share">
+    <div>${list.map((a) => `<label class="acct"><input type="checkbox" data-acct="${esc(a.id)}" ${picked.includes(a.id) || !picked.length ? "checked" : ""}>
+      ${a.picture ? `<img src="${esc(a.picture)}" alt="">` : ""}${esc(platName(a.platform))} <span class="muted">${esc(a.name)}</span></label>`).join("")}</div>
+    <div class="when-row">
+      <label><input type="radio" name="when-${esc(p.id)}" value="now" checked> Now</label>
+      <label><input type="radio" name="when-${esc(p.id)}" value="later"> Later</label>
+      <input type="datetime-local" class="when-at" value="${local}">
+    </div>
+    ${p.aspect === "9:16" ? `<p class="muted small">Story size: on Instagram it goes out as a Story.</p>` : ""}
+    <div class="actions"><button class="primary" data-act="publish">📤 Send</button><button data-act="cancel-share">Cancel</button></div></div>`;
+}
+
+async function loadPlatforms(force) {
+  if (zern && !force) return zern;
+  zern = await api("/api/platforms");
+  return zern;
+}
+
+function renderPlatforms() {
+  if (!zern) {
+    $("#zernio-status").textContent = "Loading…";
+    loadPlatforms().then(renderPlatforms, (e) => { $("#zernio-status").textContent = e.message; });
+    return;
+  }
+  $("#zernio-status").innerHTML = zern.has_key
+    ? `<b class="ok">●</b> Key saved (ends in ${esc(zern.key_tail)}). ${zern.error ? `<span class="bad">${esc(zern.error)}</span>` : `${zern.accounts.length} account${zern.accounts.length === 1 ? "" : "s"} connected in Zernio.`}`
+    : `<b class="bad">●</b> No key yet. Posts can only be downloaded until you add one.`;
+  $("#zernio-remove").hidden = !zern.has_key;
+  $("#zernio-key").placeholder = zern.has_key ? "Paste a new key to replace it" : "Paste the key";
+  $("#channels-title").textContent = `Where ${project() ? project().name : "this project"} posts`;
+  const picked = brief().channels || [];
+  $("#channels").innerHTML = Object.entries(zern.platforms).map(([k, info]) => {
+    const list = zern.accounts.filter((a) => a.platform === k);
+    const body = info.video
+      ? `<p class="muted small">YouTube only takes videos. It switches on when video posts come (Higgsfield).${list.length ? ` Connected: ${list.map((a) => esc(a.name)).join(", ")}.` : ""}</p>`
+      : list.length
+        ? list.map((a) => `<label class="acct ${a.ok ? "" : "off"}"><input type="checkbox" data-channel="${esc(a.id)}" ${picked.includes(a.id) ? "checked" : ""} ${a.ok ? "" : "disabled"}>
+            ${a.picture ? `<img src="${esc(a.picture)}" alt="">` : ""}${esc(a.name)}${a.ok ? "" : ` <span class="bad small">reconnect it in Zernio</span>`}</label>`).join("")
+        : `<p class="muted small">Not connected. Connect ${esc(info.name)} on zernio.com, then press Reload accounts.</p>`;
+    return `<div class="plat"><h3>${esc(info.name)}</h3>${body}</div>`;
+  }).join("");
+}
+
+async function onChannelChange(e) {
+  if (!e.target.closest("input[data-channel]")) return;
+  const channels = [...document.querySelectorAll("#channels input[data-channel]:checked")].map((b) => b.dataset.channel);
+  try {
+    await api(`/api/projects/${projectId}`, { method: "PUT", body: { brief: { channels } } });
+    toast(channels.length ? "Saved. New posts go to the ticked accounts." : "Saved. No accounts ticked.");
+    await refresh();
+  } catch (err) { toast(err.message); }
 }
 
 function renderAssets() {
@@ -400,20 +487,45 @@ async function onCardClick(e) {
   const post = state.posts.find((p) => p.id === id);
   if (act === "edit") { editing = id; return renderList(); }
   if (act === "cancel-edit") { editing = null; return renderList(); }
+  if (act === "cancel-share") { sharing = null; return renderList(); }
+  if (act === "go-platforms") { sharing = null; tab = "platforms"; store.set("tab", tab); return render(); }
+  if (act === "share") {
+    sharing = id;
+    renderList();
+    try { await loadPlatforms(); } catch (err) { toast(err.message); }
+    return renderList();
+  }
   if (act === "copy") {
     await navigator.clipboard.writeText(fullCaption(post)).then(() => toast("Caption copied."), () => toast("Could not copy."));
     return;
   }
-  if (act === "remove" && !confirmTwice(btn, "Tap Remove again to delete this post.")) return;
+  if (act === "remove" && !confirmTwice(btn, post.status === "scheduled" ? "Tap Remove again: this also cancels the schedule." : "Tap Remove again to delete this post.")) return;
+  if (act === "unschedule" && !confirmTwice(btn, "Tap Cancel schedule again to stop it going out.")) return;
   await busy(btn, async () => {
     if (act === "save-caption") {
       const text = btn.closest(".card").querySelector(".edit-box").value.trim();
       if (text.length > 2200) throw new Error("Instagram allows 2,200 characters at most.");
       await api(`/api/posts/${id}/caption`, { method: "POST", body: { caption: text } });
       editing = null;
+    } else if (act === "publish") {
+      const card = btn.closest(".card");
+      const accountIds = [...card.querySelectorAll("input[data-acct]:checked")].map((b) => b.dataset.acct);
+      if (!accountIds.length) throw new Error("Tick at least one platform.");
+      const later = card.querySelector(`input[name="when-${id}"]:checked`).value === "later";
+      const at = card.querySelector(".when-at").value;
+      if (later && !at) throw new Error("Pick the date and time.");
+      btn.textContent = later ? "Scheduling…" : "Posting… (up to a minute)";
+      const res = await api(`/api/posts/${id}/publish`, { method: "POST", body: { account_ids: accountIds, when: later ? new Date(at).toISOString() : "" } });
+      sharing = null;
+      const bad = res.social.targets.filter((t) => t.status === "failed").length;
+      toast(later ? "Scheduled. Zernio posts it at that time." : bad ? `Sent, but ${bad} platform${bad > 1 ? "s" : ""} failed. See the post.` : "Posted.");
+      filter = "posted";
+      store.set("filter", filter);
     } else {
       await api(`/api/posts/${id}/${act}`, { method: "POST", body: {} });
-      if (act === "approve") toast("Approved. Download it for now; auto-posting comes with Zernio.");
+      if (act === "approve") toast("Approved. Press 📤 Post / schedule to send it out.");
+      if (act === "check") toast("Status updated from Zernio.");
+      if (act === "unschedule") toast("Schedule cancelled. The post is back in Approved.");
     }
     await refresh();
     poll();
@@ -593,6 +705,21 @@ function init() {
   });
 
   $("#brief-save").addEventListener("click", onBriefSave);
+
+  $("#channels").addEventListener("change", onChannelChange);
+  $("#zernio-save").addEventListener("click", () => busy($("#zernio-save"), async () => {
+    const key = $("#zernio-key").value.trim();
+    if (!key) throw new Error("Paste the Zernio API key first.");
+    zern = await api("/api/platforms", { method: "PUT", body: { key } });
+    $("#zernio-key").value = "";
+    toast(`Key works. ${zern.accounts.length} account${zern.accounts.length === 1 ? "" : "s"} found.`);
+    renderPlatforms();
+  }));
+  $("#zernio-reload").addEventListener("click", () => busy($("#zernio-reload"), async () => { await loadPlatforms(true); renderPlatforms(); }));
+  $("#zernio-remove").addEventListener("click", (e) => {
+    if (!confirmTwice(e.target, "Tap again to remove the Zernio key. Posting stops until a new one is added.")) return;
+    busy(e.target, async () => { await api("/api/platforms", { method: "DELETE" }); await loadPlatforms(true); renderPlatforms(); });
+  });
   $("#project-delete").addEventListener("click", (e) => {
     if (!confirmTwice(e.target, `Tap again to delete ${project().name} for good.`)) return;
     busy(e.target, async () => {

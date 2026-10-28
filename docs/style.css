@@ -216,3 +216,21 @@ nav { flex-wrap: wrap; }
 .chip.hint, .chip.rule { color: var(--warn); }
 .chip.lesson { color: var(--ok); }
 .chip.log { color: var(--muted); }
+
+/* ---- platforms (Zernio) ---- */
+.chip.approved { color: var(--ok); }
+.chip.scheduled { color: var(--accent); }
+.plat { border-top: 1px solid var(--line); padding: 12px 0; }
+.plat:first-child { border-top: 0; }
+.plat h3 { margin: 0 0 8px; padding: 0; border: 0; }
+.acct { display: inline-flex; align-items: center; gap: 8px; margin: 0 8px 8px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; font-weight: 500; }
+.acct img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; }
+.acct input { width: auto; margin: 0; }
+.acct.off { opacity: .55; cursor: default; }
+.share { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 10px 0; }
+.share .when-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.share .when-row label { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.share .when-row input[type=radio] { width: auto; margin: 0; }
+.share input[type=datetime-local] { width: auto; max-width: 100%; }
+.targets { list-style: none; padding: 0; margin: 8px 0; font-size: 14px; }
+.targets li { margin: 4px 0; overflow-wrap: anywhere; }

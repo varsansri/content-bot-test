@@ -3,6 +3,7 @@
 // jobs to the brain (Antigravity on the PC helper) through /api/agent/*.
 //
 // Secrets: PASSWORD, SESSION_KEY (website login), AGENT_TOKEN (the PC helper's key).
+// The Zernio API key is not a secret here: it is typed into the Platforms tab and kept in D1 settings.
 // Bindings: DB (D1), FILES (KV), ASSETS (static site).
 
 const COOKIE = "lab";
@@ -65,7 +66,7 @@ const run = (env, sql, ...args) => env.DB.prepare(sql).bind(...args).run();
 const parse = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
 
 function postOut(p) {
-  return { ...p, hashtags: parse(p.hashtags, []) };
+  return { ...p, hashtags: parse(p.hashtags, []), social: parse(p.social, {}) };
 }
 function assetOut(a) {
   return { ...a, settings: parse(a.settings, {}), url: `/api/file/${a.file_key}` };
@@ -118,6 +119,141 @@ async function storage(env) {
     cloud: { total, limit: KV_FREE_BYTES, rows },
     pc: helper ? { last_seen: helper.last_seen, ...parse(helper.info, {}) } : null,
   };
+}
+
+// ---------- Zernio: posting to Instagram, Threads, X, LinkedIn, YouTube ----------
+// The Zernio key is typed into the Platforms tab and kept in D1 (settings); it never goes back to the browser.
+// Each project keeps the Zernio account ids it posts to in brief.channels.
+
+const ZERNIO = "https://zernio.com/api/v1";
+// limit = caption length the platform takes; video = only takes videos, so a picture post skips it.
+const PLATFORMS = {
+  instagram: { name: "Instagram", limit: 2200 },
+  threads: { name: "Threads", limit: 500 },
+  twitter: { name: "X", limit: 280 },
+  linkedin: { name: "LinkedIn", limit: 3000 },
+  youtube: { name: "YouTube", limit: 5000, video: true },
+};
+
+async function setting(env, k) {
+  const row = await one(env, "SELECT v FROM settings WHERE k = ?", k);
+  return row ? row.v : "";
+}
+
+async function zernio(env, path, { method = "GET", body, key } = {}) {
+  key ||= await setting(env, "zernio_key");
+  if (!key) throw new Error("Add your Zernio API key in the Platforms tab first.");
+  const res = await fetch(ZERNIO + path, {
+    method,
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) throw new Error("Zernio did not accept the API key. Check it in the Platforms tab.");
+  if (!res.ok && res.status !== 207) throw new Error(`Zernio: ${data.error || data.message || `error ${res.status}`}`);
+  return data;
+}
+
+async function zernioAccounts(env, key) {
+  const { accounts = [] } = await zernio(env, "/accounts?category=social", { key });
+  return accounts.filter((a) => PLATFORMS[a.platform]).map((a) => ({
+    id: a._id,
+    platform: a.platform,
+    name: a.username ? `@${String(a.username).replace(/^@/, "")}` : a.displayName || PLATFORMS[a.platform].name,
+    picture: a.profilePicture || "",
+    ok: a.isActive !== false && !a.needsReconnection,
+  }));
+}
+
+// Caption + hashtags inside a platform's limit: drop hashtags first, then shorten at a word.
+function fitText(text, tags, limit) {
+  for (let n = tags.length; n >= 0; n--) {
+    const out = text + (n ? "\n\n" + tags.slice(0, n).join(" ") : "");
+    if (out.length <= limit) return out;
+  }
+  const cut = text.slice(0, limit - 1);
+  return cut.slice(0, Math.max(cut.lastIndexOf(" "), limit / 2)).trimEnd() + "…";
+}
+
+function textFor(platform, post) {
+  const tags = parse(post.hashtags, []);
+  const limit = PLATFORMS[platform].limit;
+  // X: a long caption becomes the headline and subtext instead of a cut-off caption.
+  const text = platform === "twitter" && post.caption.length > limit ? [post.headline, post.subtext].filter(Boolean).join("\n\n") : post.caption;
+  return fitText(text, platform === "twitter" ? tags.slice(0, 3) : tags, limit);
+}
+
+// What the site shows about a post on the platforms, from Zernio's post.
+function socialFrom(zp, accounts, when) {
+  const targets = (zp.platforms || []).map((t) => {
+    const id = t.accountId && typeof t.accountId === "object" ? t.accountId._id : t.accountId;
+    const a = accounts.find((x) => x.id === id) || {};
+    return { platform: t.platform, name: a.name || "", status: t.status || zp.status || "", url: t.platformPostUrl || "", error: t.errorMessage || "" };
+  });
+  return { id: zp._id, status: zp.status || "", when: when || zp.scheduledFor || "", targets };
+}
+
+function postStatusFrom(social, fallback) {
+  if (social.targets.some((t) => t.status === "published")) return "posted";
+  if (["scheduled", "pending", "publishing", "processing"].includes(social.status) || social.targets.some((t) => ["pending", "processing", "uploading"].includes(t.status))) return "scheduled";
+  return fallback;
+}
+
+async function publish(env, post, body) {
+  if (!post.post_key || !["draft", "approved", "posted"].includes(post.status)) throw new Error("Only a finished post can go out.");
+  const accounts = await zernioAccounts(env);
+  const chosen = accounts.filter((a) => (body.account_ids || []).includes(a.id) && !PLATFORMS[a.platform].video);
+  if (!chosen.length) throw new Error("Tick at least one platform.");
+  let when = "";
+  if (body.when) {
+    const t = Date.parse(body.when);
+    if (!(t > Date.now() + 2 * 60000)) throw new Error("Pick a time at least a few minutes from now.");
+    when = new Date(t).toISOString();
+  }
+  // Give Zernio the picture, then make the post with each platform's own text.
+  const picture = await env.FILES.get(post.post_key, { type: "arrayBuffer" });
+  if (!picture) throw new Error("The picture is missing. Make a new picture first.");
+  const slot = await zernio(env, "/media/presign", { method: "POST", body: { filename: `${post.id}.jpg`, contentType: "image/jpeg", size: picture.byteLength } });
+  const up = await fetch(slot.uploadUrl, { method: "PUT", body: picture, headers: { "Content-Type": "image/jpeg" } });
+  if (!up.ok) throw new Error(`Zernio did not take the picture (error ${up.status}).`);
+  const res = await zernio(env, "/posts", {
+    method: "POST",
+    body: {
+      title: post.headline,
+      content: textFor("instagram", post),
+      mediaItems: [{ type: "image", url: slot.publicUrl, altText: post.headline }],
+      platforms: chosen.map((a) => ({
+        platform: a.platform,
+        accountId: a.id,
+        customContent: textFor(a.platform, post),
+        ...(a.platform === "instagram" && post.aspect === "9:16" ? { platformSpecificData: { contentType: "story" } } : {}),
+      })),
+      ...(when ? { scheduledFor: when } : { publishNow: true }),
+    },
+  });
+  if (!res.post) throw new Error(`Zernio: ${res.error || res.message || "the post was not made"}`);
+  const social = socialFrom(res.post, chosen, when);
+  const failed = social.targets.filter((t) => t.status === "failed");
+  const status = when ? "scheduled" : postStatusFrom(social, post.status);
+  await run(env, "UPDATE posts SET status = ?, social = ?, error = ?, updated = ? WHERE id = ?", status, JSON.stringify(social),
+    failed.map((t) => `${PLATFORMS[t.platform] ? PLATFORMS[t.platform].name : t.platform}: ${t.error || "failed"}`).join("\n").slice(0, 800), now(), post.id);
+  if (status === "posted") await remember(env, post.project_id, "feedback",
+    `Posted "${post.headline}" to ${social.targets.filter((t) => t.status === "published").map((t) => PLATFORMS[t.platform].name).join(", ")}.`, "log");
+  return { status, social };
+}
+
+// Ask Zernio how a scheduled or posted post is doing.
+async function checkSocial(env, post) {
+  const social = parse(post.social, {});
+  if (!social.id) throw new Error("This post has not been sent to Zernio.");
+  const [{ post: zp }, accounts] = await Promise.all([zernio(env, `/posts/${social.id}`), zernioAccounts(env).catch(() => [])]);
+  if (!zp) throw new Error("Zernio no longer has this post.");
+  const fresh = socialFrom(zp, accounts, social.when);
+  fresh.targets.forEach((t, i) => { t.name ||= (social.targets[i] || {}).name || ""; });
+  const status = postStatusFrom(fresh, "approved");
+  const failed = fresh.targets.filter((t) => t.status === "failed");
+  await run(env, "UPDATE posts SET status = ?, social = ?, error = ?, updated = ? WHERE id = ?", status, JSON.stringify(fresh),
+    failed.map((t) => `${PLATFORMS[t.platform] ? PLATFORMS[t.platform].name : t.platform}: ${t.error || "failed"}`).join("\n").slice(0, 800), now(), post.id);
 }
 
 // ---------- website API ----------
@@ -209,7 +345,19 @@ async function site(req, env, url) {
     } else if (act === "approve") {
       await run(env, "UPDATE posts SET status = 'approved', updated = ? WHERE id = ?", t, post.id);
       await remember(env, post.project_id, "feedback", `The owner approved: "${post.headline}" (${post.aspect}).`, "feedback");
+    } else if (act === "publish") {
+      return json(await publish(env, post, body));
+    } else if (act === "check") {
+      await checkSocial(env, post);
+    } else if (act === "unschedule") {
+      const social = parse(post.social, {});
+      if (post.status !== "scheduled" || !social.id) return fail("This post is not scheduled.");
+      await zernio(env, `/posts/${social.id}`, { method: "DELETE" });
+      await run(env, "UPDATE posts SET status = 'approved', social = '{}', error = '', updated = ? WHERE id = ?", t, post.id);
     } else if (act === "remove") {
+      // A scheduled post is cancelled on Zernio too; already-published posts stay on the platforms.
+      const social = parse(post.social, {});
+      if (post.status === "scheduled" && social.id) await zernio(env, `/posts/${social.id}`, { method: "DELETE" });
       await run(env, "UPDATE posts SET status = 'removed', updated = ? WHERE id = ?", t, post.id);
       if (post.headline) await remember(env, post.project_id, "feedback", `The owner rejected: "${post.headline}"${body.reason ? ` because: ${String(body.reason).slice(0, 200)}` : ""}.`, "feedback");
       await Promise.all([deleteFile(env, post.post_key), deleteFile(env, post.background_key)]);
@@ -218,6 +366,28 @@ async function site(req, env, url) {
       return fail("Unknown action.");
     }
     return json({ ok: true });
+  }
+
+  // Platforms tab: the Zernio key and the accounts connected in Zernio.
+  if (p === "/api/platforms") {
+    if (m === "PUT") {
+      const key = String(body.key || "").trim();
+      if (!key) return fail("Paste the Zernio API key.");
+      const accounts = await zernioAccounts(env, key); // fails here if the key is wrong
+      await run(env, "INSERT INTO settings (k, v) VALUES ('zernio_key', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", key);
+      return json({ has_key: true, key_tail: key.slice(-4), accounts, platforms: PLATFORMS });
+    }
+    if (m === "DELETE") {
+      await run(env, "DELETE FROM settings WHERE k = 'zernio_key'");
+      return json({ ok: true });
+    }
+    const key = await setting(env, "zernio_key");
+    if (!key) return json({ has_key: false, accounts: [], platforms: PLATFORMS });
+    try {
+      return json({ has_key: true, key_tail: key.slice(-4), accounts: await zernioAccounts(env), platforms: PLATFORMS });
+    } catch (e) {
+      return json({ has_key: true, key_tail: key.slice(-4), accounts: [], platforms: PLATFORMS, error: e.message });
+    }
   }
 
   if (p === "/api/assets" && m === "POST") {

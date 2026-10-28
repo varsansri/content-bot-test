@@ -289,6 +289,12 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     if os.name == "nt":
         ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), LOW_PRIORITY)
+        # one helper at a time: two would grab the same jobs
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW(None, False, "MiMediaContentLabHelper")
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            log("The helper is already running. Closing this copy.")
+            return
     if "--once" in sys.argv:
         work_once()
         return
